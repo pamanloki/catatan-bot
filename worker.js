@@ -135,6 +135,8 @@ async function handleCallback(env, cq) {
     }
     if (data.startsWith("del:")) return deleteByTs(env, chatId, uid, Number(data.slice(4)));
     if (data === "dorestore") return doRestore(env, chatId, uid);
+    if (data === "ai_on") return handleAi(env, chatId, uid, "on");
+    if (data === "ai_off") return handleAi(env, chatId, uid, "off");
     switch (data) {
       case "menu": return sendMenu(env, chatId);
       // Submenu kategori
@@ -157,6 +159,7 @@ async function handleCallback(env, cq) {
       case "lunas": return handleLunas(env, chatId, uid, "", BACK_MENU);
       case "export": return exportCsv(env, chatId, uid, BACK_MENU);
       case "excel": return exportExcel(env, chatId, uid, BACK_MENU);
+      case "ai": return handleAi(env, chatId, uid, "");
       case "backup": return handleBackup(env, chatId, uid, BACK_MENU);
       case "restore":
         return sendMessage(env, chatId, "📥 Kirim file backup (.json) ke sini untuk memulihkan data.", BACK_MENU);
@@ -221,6 +224,7 @@ async function routeMessage(env, chatId, msg) {
   if (lower.startsWith("/total")) return sendTotal(env, chatId, uid);
   if (lower.startsWith("/excel")) return exportExcel(env, chatId, uid);
   if (lower.startsWith("/export")) return exportCsv(env, chatId, uid);
+  if (lower.startsWith("/ai")) return handleAi(env, chatId, uid, text.slice(3).trim());
   if (lower.startsWith("/backup")) return handleBackup(env, chatId, uid);
   if (lower.startsWith("/restore")) return sendMessage(env, chatId, "📥 Kirim file backup (.json) ke sini untuk memulihkan data.", BACK_MENU);
   if (lower.startsWith("/hapus")) return handleHapus(env, chatId, uid, text.slice(6).trim());
@@ -349,7 +353,8 @@ async function handleReceiptPhoto(env, chatId, msg, mode) {
   const photo = msg.photo[msg.photo.length - 1]; // ukuran terbesar
   const bytes = await getTelegramFile(env, photo.file_id);
 
-  const result = await readReceipt(env, bytes);
+  const cfgAi = await getConfig(env, msg.from.id);
+  const result = await readReceipt(env, bytes, cfgAi.useGemini);
   if (!result || !result.amount) {
     const why = result && result.debug ? `\n\n(debug: ${result.debug})` : "";
     return sendMessage(
@@ -435,9 +440,9 @@ function classifyPhoto(caption, mode) {
   return { kind: "keluar", note: cap };
 }
 
-// Pilih mesin OCR: Gemini (akurat) kalau key ada, kalau tidak Workers AI.
-async function readReceipt(env, arrayBuffer) {
-  if (env.GEMINI_API_KEY) {
+// Pilih mesin OCR: Gemini (akurat) kalau key ada & diizinkan, jika tidak Workers AI.
+async function readReceipt(env, arrayBuffer, useGemini = true) {
+  if (env.GEMINI_API_KEY && useGemini) {
     const g = await readReceiptGemini(env, arrayBuffer);
     if (g && g.amount) return g;
     // kalau Gemini gagal & Workers AI tersedia, coba cadangan
@@ -771,6 +776,7 @@ async function getConfig(env, uid) {
     budget: c.budget || 0,
     wallets: Array.isArray(c.wallets) && c.wallets.length ? c.wallets : ["Cash", "Bank"],
     defaultWallet: c.defaultWallet || "Cash",
+    useGemini: c.useGemini !== false, // default true (pakai Gemini bila key ada)
   };
 }
 
@@ -1139,6 +1145,41 @@ async function handleBackup(env, chatId, uid, markup) {
     "application/json",
   );
   if (markup) await sendMessage(env, chatId, "Selesai. 👇", markup);
+}
+
+// /ai            -> status mesin baca struk + tombol
+// /ai on | off   -> pakai Gemini (on) atau Workers AI (off)
+async function handleAi(env, chatId, uid, arg) {
+  const cfg = await getConfig(env, uid);
+  const a = arg.toLowerCase();
+
+  if (a === "on" || a === "gemini") {
+    if (!env.GEMINI_API_KEY) return sendMessage(env, chatId, "GEMINI_API_KEY belum diset di Worker.", BACK_MENU);
+    cfg.useGemini = true;
+    await saveConfig(env, uid, cfg);
+    return sendMessage(env, chatId, "🤖 Mesin baca struk: Gemini (akurat).", BACK_MENU);
+  }
+  if (a === "off" || a === "workers" || a === "cf") {
+    cfg.useGemini = false;
+    await saveConfig(env, uid, cfg);
+    return sendMessage(env, chatId, "🤖 Mesin baca struk: Workers AI (data tetap di Cloudflare).", BACK_MENU);
+  }
+
+  const aktif = cfg.useGemini && env.GEMINI_API_KEY ? "Gemini" : "Workers AI";
+  const punyaGemini = env.GEMINI_API_KEY ? "ada" : "belum diset";
+  const rows = [
+    [
+      { text: "🤖 Gemini (akurat)", callback_data: "ai_on" },
+      { text: "☁️ Workers AI (privat)", callback_data: "ai_off" },
+    ],
+    [BACK_BTN],
+  ];
+  return sendMessage(
+    env,
+    chatId,
+    `Mesin baca struk saat ini: ${aktif}.\nGEMINI_API_KEY: ${punyaGemini}.\n\n• Gemini: lebih akurat, tapi data struk bisa dipakai Google (free tier).\n• Workers AI: kurang akurat, tapi data tetap di Cloudflare.`,
+    { reply_markup: { inline_keyboard: rows } },
+  );
 }
 
 // Terima file .json -> validasi -> minta konfirmasi sebelum menimpa.
@@ -1780,9 +1821,10 @@ function helpText() {
     "/hapus   — hapus catatan terakhir",
     "/hapusall — hapus semua (perlu konfirmasi)",
     "",
-    "━ BACKUP ━",
+    "━ BACKUP & AI ━",
     "/backup  — unduh file backup .json",
     "/restore — kirim file .json untuk memulihkan",
+    "/ai      — pilih mesin baca struk (Gemini/Workers AI)",
     "",
     "ℹ️ Rekap bulan lalu dikirim otomatis tiap awal bulan.",
   ].join("\n");
@@ -1894,9 +1936,10 @@ const MENU_LAIN = {
         { text: "📥 Restore", callback_data: "restore" },
       ],
       [
+        { text: "🤖 Mesin AI", callback_data: "ai" },
         { text: "📆 Hari ini", callback_data: "hari" },
-        { text: "❓ Bantuan", callback_data: "help" },
       ],
+      [{ text: "❓ Bantuan", callback_data: "help" }],
       [BACK_BTN],
     ],
   },
