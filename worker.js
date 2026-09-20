@@ -389,7 +389,7 @@ function helpText() {
   return [
     "🧾 Bot Catatan Keuangan",
     "",
-    "Pengeluaran: 50rb makan siang",
+    "Pengeluaran: 50rb makan siang  (atau -50rb makan)",
     "Pemasukan  : +5jt gaji  (pakai tanda +)",
     "Foto struk : kirim fotonya (jadi pengeluaran)",
     "",
@@ -406,12 +406,15 @@ function helpText() {
   ].join("\n");
 }
 
-// Pengeluaran default; pemasukan kalau diawali '+'.
+// Pengeluaran = default (tanpa tanda) atau diawali '-'; pemasukan diawali '+'.
 function parseFlow(text) {
   let kind = "keluar";
   let t = text;
   if (t.startsWith("+")) {
     kind = "masuk";
+    t = t.slice(1).trim();
+  } else if (t.startsWith("-")) {
+    kind = "keluar";
     t = t.slice(1).trim();
   }
   const p = parseAmountToken(t);
