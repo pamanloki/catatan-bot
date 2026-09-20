@@ -1279,6 +1279,9 @@ function cellXml(ref, c) {
 function sheetXml(rows, opts = {}) {
   let x = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
   x += '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">';
+  let maxc = 1;
+  for (const r of rows) if (r.length > maxc) maxc = r.length;
+  x += `<dimension ref="A1:${colLetter(maxc - 1)}${rows.length || 1}"/>`;
   // Sembunyikan gridline bawaan (pakai border sel) + bekukan baris header.
   x += '<sheetViews><sheetView showGridLines="0" workbookViewId="0">';
   if (opts.freeze) {
