@@ -25,7 +25,9 @@ Seluruh logika ada di satu file: `worker.js` (tanpa framework/dependency).
 
 **Laporan & data**
 - 📊 `/laporan` (hari & bulan ini, per kategori) · `/laporan agustus` (bulan tertentu)
-- 📈 `/grafik` pai per kategori · 🔍 `/cari grab` · 💰 `/total` · 📄 `/export` CSV
+- 📈 `/grafik` pai per kategori · 🔍 `/cari grab` · 💰 `/total`
+- 📊 `/excel` — file **.xlsx**: 1 sheet per bulan, format Rupiah otomatis, saldo berjalan (seperti rekening koran)
+- 📄 `/export` — CSV (data mentah: kolom Bulan, Masuk/Keluar, Saldo berjalan; angka polos aman di semua locale)
 - 🗓️ Rekap bulan lalu dikirim **otomatis** tiap awal bulan (Cron)
 
 **Kelola & lainnya**

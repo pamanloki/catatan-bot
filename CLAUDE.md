@@ -10,8 +10,10 @@ Seluruh logika ada di satu file: **`worker.js`** (tanpa framework, tanpa depende
 Fitur: catat pengeluaran/pemasukan (teks & foto struk/transfer via AI), tarik tunai &
 transfer antar **dompet** (saldo per dompet + set saldo awal), hutang/piutang +
 pelunasan + backdate tanggal, kategori otomatis, budget + peringatan, laporan
-harian/bulanan/bulan-tertentu, grafik pai, cari, edit/hapus per catatan, export CSV,
-menu tombol (inline keyboard) dengan "mode" input, dan rekap bulanan otomatis (Cron).
+harian/bulanan/bulan-tertentu, grafik pai, cari, edit/hapus per catatan, export CSV
+(gaya rekening koran) & **XLSX** (sheet per bulan, format Rupiah, ditulis manual tanpa
+library: XML + ZIP stored), menu tombol (inline keyboard) dengan "mode" input, dan
+rekap bulanan otomatis (Cron).
 
 ## Deploy
 

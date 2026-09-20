@@ -155,6 +155,7 @@ async function handleCallback(env, cq) {
       case "budget": return handleBudget(env, chatId, uid, "", BACK_MENU);
       case "lunas": return handleLunas(env, chatId, uid, "", BACK_MENU);
       case "export": return exportCsv(env, chatId, uid, BACK_MENU);
+      case "excel": return exportExcel(env, chatId, uid, BACK_MENU);
       case "hari":
         return sendMessage(env, chatId, `📆 Sekarang: ${namaHariTanggal(Date.now())} (WIB)`, BACK_MENU);
       case "help": return sendMessage(env, chatId, helpText(), BACK_MENU);
@@ -211,6 +212,7 @@ async function routeMessage(env, chatId, msg) {
   if (lower.startsWith("/grafik") || lower.startsWith("/chart")) return sendChart(env, chatId, uid);
   if (lower.startsWith("/cari")) return handleCari(env, chatId, uid, text.slice(5).trim());
   if (lower.startsWith("/total")) return sendTotal(env, chatId, uid);
+  if (lower.startsWith("/excel")) return exportExcel(env, chatId, uid);
   if (lower.startsWith("/export")) return exportCsv(env, chatId, uid);
   if (lower.startsWith("/hapus")) return handleHapus(env, chatId, uid, text.slice(6).trim());
   if (lower.startsWith("/hari") || lower.startsWith("/tanggal")) return sendMessage(env, chatId, `📆 Sekarang: ${namaHariTanggal(Date.now())} (WIB)`);
@@ -1064,6 +1066,270 @@ function csvCell(v) {
   return /[",\r\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
 }
 
+// ---------------------------------------------------------------------------
+// Export Excel (.xlsx) — per bulan jadi sheet, format Rupiah, saldo berjalan.
+// XLSX ditulis manual (tanpa library): kumpulan XML dibungkus ZIP (stored).
+// ---------------------------------------------------------------------------
+
+async function exportExcel(env, chatId, uid, markup) {
+  const list = await getEntries(env, uid);
+  if (!list.length) return sendMessage(env, chatId, "Belum ada catatan untuk diexport.", markup);
+  if (list.length > 8000) {
+    return sendMessage(env, chatId, "Data terlalu banyak untuk Excel. Pakai /export (CSV) saja ya.", markup);
+  }
+  const cfg = await getConfig(env, uid);
+  const bytes = buildExcel(list, cfg);
+  const now = wibParts(Date.now());
+  await sendDocument(
+    env,
+    chatId,
+    bytes,
+    `laporan-${now.y}${pad(now.m)}.xlsx`,
+    "📊 Laporan Excel — per bulan, format Rupiah, saldo berjalan.",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  );
+  if (markup) await sendMessage(env, chatId, "Selesai. 👇", markup);
+}
+
+// Susun workbook: satu sheet per bulan (kronologis), saldo berjalan menyambung.
+function buildExcel(list, cfg) {
+  const sorted = [...list].sort((a, b) => a.ts - b.ts);
+  const months = []; // { key, name, entries }
+  const byKey = {};
+  for (const e of sorted) {
+    const p = wibParts(e.ts);
+    const key = p.y * 100 + p.m;
+    if (!byKey[key]) {
+      byKey[key] = { key, name: `${NAMA_BULAN[p.m - 1]} ${p.y}`, entries: [] };
+      months.push(byKey[key]);
+    }
+    byKey[key].entries.push(e);
+  }
+
+  const HEAD = ["Tanggal", "Waktu", "Jenis", "Masuk", "Keluar", "Saldo", "Kategori", "Keterangan", "Pihak", "Dompet", "Status"];
+  let saldo = 0;
+  const sheets = months.map((m) => {
+    const rows = [];
+    rows.push(HEAD.map((h) => ({ v: h, s: 1 }))); // header
+    rows.push([bcell(""), bcell(""), bcell("Saldo awal"), null, null, num(saldo, true), null, null, null, null, null]);
+    let tMasuk = 0, tKeluar = 0;
+    for (const e of m.entries) {
+      const d = new Date(e.ts + WIB_OFFSET_MS);
+      let masukN = null, keluarN = null;
+      if (e.kind === "masuk") { saldo += e.amount; tMasuk += e.amount; masukN = num(e.amount); }
+      else if (e.kind === "keluar") { saldo -= e.amount; tKeluar += e.amount; keluarN = num(e.amount); }
+      else if (e.kind === "mutasi") {
+        if (e.to && !e.from) { saldo += e.amount; masukN = num(e.amount); }
+        else if (e.from && !e.to) { saldo -= e.amount; keluarN = num(e.amount); }
+      }
+      const dompet = e.kind === "mutasi" ? `${e.from || ""}→${e.to || ""}` : e.wallet || "";
+      rows.push([
+        cell(`${pad(d.getUTCDate())}/${pad(d.getUTCMonth() + 1)}/${d.getUTCFullYear()}`),
+        cell(`${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}`),
+        cell(e.kind),
+        masukN, keluarN, num(saldo),
+        cell(e.category || ""), cell(e.note || ""), cell(e.party || ""), cell(dompet), cell(e.status || ""),
+      ]);
+    }
+    rows.push([bcell(""), bcell(""), bcell("TOTAL"), num(tMasuk, true), num(tKeluar, true), num(saldo, true), null, null, null, null, null]);
+    return { name: m.name, rows };
+  });
+
+  if (!sheets.length) sheets.push({ name: "Kosong", rows: [HEAD.map((h) => ({ v: h, s: 1 }))] });
+  return xlsxPackage(sheets);
+}
+
+// Helper sel
+function cell(v) { return { v: v == null ? "" : String(v) }; }
+function bcell(v) { return { v: v == null ? "" : String(v), s: 4 }; }
+function num(n, bold) { return { v: Math.round(n), t: "n", s: bold ? 3 : 2 }; }
+
+// --- XLSX / ZIP internals ---
+const XLSX_CRC = (() => {
+  const t = new Uint32Array(256);
+  for (let n = 0; n < 256; n++) {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    t[n] = c >>> 0;
+  }
+  return t;
+})();
+function crc32(u) {
+  let c = 0xffffffff;
+  for (let i = 0; i < u.length; i++) c = XLSX_CRC[(c ^ u[i]) & 0xff] ^ (c >>> 8);
+  return (c ^ 0xffffffff) >>> 0;
+}
+function enc(s) { return new TextEncoder().encode(s); }
+function xesc(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&apos;" }[c]));
+}
+function colLetter(n) {
+  let s = "";
+  n++;
+  while (n > 0) { const m = (n - 1) % 26; s = String.fromCharCode(65 + m) + s; n = (n - m - 1) / 26; }
+  return s;
+}
+function cellXml(ref, c) {
+  if (!c || c.v === "" || c.v == null) return `<c r="${ref}"${c && c.s ? ` s="${c.s}"` : ""}/>`;
+  if (c.t === "n") return `<c r="${ref}" s="${c.s || 0}"><v>${c.v}</v></c>`;
+  return `<c r="${ref}" s="${c.s || 0}" t="inlineStr"><is><t xml:space="preserve">${xesc(c.v)}</t></is></c>`;
+}
+function sheetXml(rows) {
+  let x = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
+  x += '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">';
+  x += '<cols><col min="1" max="1" width="11"/><col min="2" max="2" width="7"/><col min="3" max="3" width="9"/><col min="4" max="6" width="14"/><col min="7" max="8" width="18"/><col min="9" max="11" width="12"/></cols>';
+  x += "<sheetData>";
+  rows.forEach((cells, ri) => {
+    x += `<row r="${ri + 1}">`;
+    cells.forEach((c, ci) => { x += cellXml(colLetter(ci) + (ri + 1), c); });
+    x += "</row>";
+  });
+  x += "</sheetData></worksheet>";
+  return x;
+}
+const STYLES_XML =
+  '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+  '<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">' +
+  '<numFmts count="1"><numFmt numFmtId="164" formatCode="&quot;Rp&quot;#,##0;[Red]&quot;Rp&quot;-#,##0"/></numFmts>' +
+  '<fonts count="3">' +
+  '<font><sz val="11"/><name val="Calibri"/></font>' +
+  '<font><b/><sz val="11"/><name val="Calibri"/></font>' +
+  '<font><b/><sz val="11"/><color rgb="FFFFFFFF"/><name val="Calibri"/></font>' +
+  "</fonts>" +
+  '<fills count="3">' +
+  '<fill><patternFill patternType="none"/></fill>' +
+  '<fill><patternFill patternType="gray125"/></fill>' +
+  '<fill><patternFill patternType="solid"><fgColor rgb="FF1F3A5F"/><bgColor indexed="64"/></patternFill></fill>' +
+  "</fills>" +
+  '<borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>' +
+  '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>' +
+  '<cellXfs count="5">' +
+  '<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>' +
+  '<xf numFmtId="0" fontId="2" fillId="2" borderId="0" xfId="0" applyFont="1" applyFill="1"/>' +
+  '<xf numFmtId="164" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>' +
+  '<xf numFmtId="164" fontId="1" fillId="0" borderId="0" xfId="0" applyNumberFormat="1" applyFont="1"/>' +
+  '<xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/>' +
+  "</cellXfs>" +
+  '<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>' +
+  "</styleSheet>";
+
+function xlsxPackage(sheets) {
+  const files = [];
+  // [Content_Types].xml
+  let ct =
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+    '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
+    '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>' +
+    '<Default Extension="xml" ContentType="application/xml"/>' +
+    '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>' +
+    '<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>';
+  sheets.forEach((_, i) => {
+    ct += `<Override PartName="/xl/worksheets/sheet${i + 1}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>`;
+  });
+  ct += "</Types>";
+  files.push({ name: "[Content_Types].xml", data: enc(ct) });
+
+  // _rels/.rels
+  files.push({
+    name: "_rels/.rels",
+    data: enc(
+      '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+        '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>' +
+        "</Relationships>",
+    ),
+  });
+
+  // xl/workbook.xml
+  let wb =
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+    '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>';
+  sheets.forEach((s, i) => {
+    const nm = xesc(s.name.slice(0, 31).replace(/[:\\/?*\[\]]/g, " "));
+    wb += `<sheet name="${nm}" sheetId="${i + 1}" r:id="rId${i + 1}"/>`;
+  });
+  wb += "</sheets></workbook>";
+  files.push({ name: "xl/workbook.xml", data: enc(wb) });
+
+  // xl/_rels/workbook.xml.rels
+  let rel =
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+    '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">';
+  sheets.forEach((_, i) => {
+    rel += `<Relationship Id="rId${i + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet${i + 1}.xml"/>`;
+  });
+  rel += `<Relationship Id="rId${sheets.length + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>`;
+  rel += "</Relationships>";
+  files.push({ name: "xl/_rels/workbook.xml.rels", data: enc(rel) });
+
+  // styles + sheets
+  files.push({ name: "xl/styles.xml", data: enc(STYLES_XML) });
+  sheets.forEach((s, i) => {
+    files.push({ name: `xl/worksheets/sheet${i + 1}.xml`, data: enc(sheetXml(s.rows)) });
+  });
+
+  return zipStore(files);
+}
+
+// ZIP tanpa kompresi (stored) — cukup untuk XLSX.
+function zipStore(files) {
+  const infos = files.map((f) => ({ nameB: enc(f.name), data: f.data, crc: crc32(f.data) }));
+  let size = 22;
+  for (const i of infos) size += 30 + i.nameB.length + i.data.length + 46 + i.nameB.length;
+  const out = new Uint8Array(size);
+  const dv = new DataView(out.buffer);
+  let off = 0;
+  const dir = [];
+  for (const i of infos) {
+    const localOff = off;
+    dv.setUint32(off, 0x04034b50, true); off += 4;
+    dv.setUint16(off, 20, true); off += 2;
+    dv.setUint16(off, 0, true); off += 2;
+    dv.setUint16(off, 0, true); off += 2;
+    dv.setUint16(off, 0, true); off += 2;
+    dv.setUint16(off, 0, true); off += 2;
+    dv.setUint32(off, i.crc, true); off += 4;
+    dv.setUint32(off, i.data.length, true); off += 4;
+    dv.setUint32(off, i.data.length, true); off += 4;
+    dv.setUint16(off, i.nameB.length, true); off += 2;
+    dv.setUint16(off, 0, true); off += 2;
+    out.set(i.nameB, off); off += i.nameB.length;
+    out.set(i.data, off); off += i.data.length;
+    dir.push({ ...i, localOff });
+  }
+  const cdStart = off;
+  for (const i of dir) {
+    dv.setUint32(off, 0x02014b50, true); off += 4;
+    dv.setUint16(off, 20, true); off += 2;
+    dv.setUint16(off, 20, true); off += 2;
+    dv.setUint16(off, 0, true); off += 2;
+    dv.setUint16(off, 0, true); off += 2;
+    dv.setUint16(off, 0, true); off += 2;
+    dv.setUint16(off, 0, true); off += 2;
+    dv.setUint32(off, i.crc, true); off += 4;
+    dv.setUint32(off, i.data.length, true); off += 4;
+    dv.setUint32(off, i.data.length, true); off += 4;
+    dv.setUint16(off, i.nameB.length, true); off += 2;
+    dv.setUint16(off, 0, true); off += 2;
+    dv.setUint16(off, 0, true); off += 2;
+    dv.setUint16(off, 0, true); off += 2;
+    dv.setUint16(off, 0, true); off += 2;
+    dv.setUint32(off, 0, true); off += 4;
+    dv.setUint32(off, i.localOff, true); off += 4;
+    out.set(i.nameB, off); off += i.nameB.length;
+  }
+  const cdSize = off - cdStart;
+  dv.setUint32(off, 0x06054b50, true); off += 4;
+  dv.setUint16(off, 0, true); off += 2;
+  dv.setUint16(off, 0, true); off += 2;
+  dv.setUint16(off, dir.length, true); off += 2;
+  dv.setUint16(off, dir.length, true); off += 2;
+  dv.setUint32(off, cdSize, true); off += 4;
+  dv.setUint32(off, cdStart, true); off += 4;
+  dv.setUint16(off, 0, true); off += 2;
+  return out;
+}
+
 // /hapus       -> hapus catatan terakhir
 // /hapus all   -> hapus SEMUA catatan (setelah konfirmasi)
 async function handleHapus(env, chatId, uid, arg) {
@@ -1365,6 +1631,7 @@ function helpText() {
     "/grafik           — grafik pai per kategori",
     "/cari grab        — cari transaksi",
     "/total            — total sepanjang waktu",
+    "/excel            — unduh Excel (per bulan, format Rp)",
     "/export           — unduh CSV",
     "/hari             — tanggal & hari sekarang",
     "",
@@ -1423,13 +1690,14 @@ const MENU_LAPORAN = {
         { text: "📈 Grafik", callback_data: "grafik" },
       ],
       [
-        { text: "💰 Total", callback_data: "total" },
-        { text: "📄 Export CSV", callback_data: "export" },
+        { text: "📊 Excel (per bulan)", callback_data: "excel" },
+        { text: "📄 CSV", callback_data: "export" },
       ],
       [
+        { text: "💰 Total", callback_data: "total" },
         { text: "🔍 Cari", callback_data: "cari" },
-        { text: "📆 Hari ini", callback_data: "hari" },
       ],
+      [{ text: "📆 Hari ini", callback_data: "hari" }],
       [BACK_BTN],
     ],
   },
@@ -1664,12 +1932,12 @@ async function sendPhoto(env, chatId, photoUrl, caption, extra) {
   if (!r.ok) await sendMessage(env, chatId, "Gagal membuat grafik. Coba lagi nanti.", extra);
 }
 
-async function sendDocument(env, chatId, content, filename, caption) {
+async function sendDocument(env, chatId, content, filename, caption, contentType) {
   if (!env.BOT_TOKEN) throw new Error("BOT_TOKEN belum diset");
   const form = new FormData();
   form.append("chat_id", String(chatId));
   if (caption) form.append("caption", caption);
-  form.append("document", new Blob([content], { type: "text/csv" }), filename);
+  form.append("document", new Blob([content], { type: contentType || "text/csv" }), filename);
   await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/sendDocument`, {
     method: "POST",
     body: form,
