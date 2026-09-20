@@ -162,6 +162,9 @@ async function handleCallback(env, cq) {
       case "add_masuk":
         await setMode(env, uid, "masuk");
         return sendMessage(env, chatId, "🟢 Ketik pemasukan (langsung):\ncontoh: 5jt gaji", BACK_MENU);
+      case "add_mutasi":
+        await setMode(env, uid, "mutasi");
+        return sendMessage(env, chatId, "💵 Ketik jumlah tarik tunai:\ncontoh: 500rb\n(tidak dihitung sebagai pengeluaran)", BACK_MENU);
       case "add_hutang":
         await setMode(env, uid, "hutang");
         return sendMessage(env, chatId, "📕 Ketik: nominal nama [ket] [tgl]\ncontoh: 100rb budi bensin tgl 15-3-2025", BACK_MENU);
@@ -231,6 +234,20 @@ async function recordFlow(env, chatId, uid, text) {
     );
   }
   const tgl = parseTanggal(flow.note);
+
+  // Tarik tunai: dicatat tapi tidak dihitung sebagai pengeluaran.
+  if (flow.kind === "mutasi") {
+    const note = tgl.rest || "tarik tunai";
+    await addEntry(env, uid, { kind: "mutasi", amount: flow.amount, note, ts: tgl.ts || 0, src: "teks" });
+    const tglT = tgl.ts ? `\n🗓️ ${namaHariTanggal(tgl.ts)}` : "";
+    return sendMessage(
+      env,
+      chatId,
+      `💵 Tarik tunai dicatat: ${fmtRp(flow.amount)} — ${note}${tglT}\n(tidak dihitung sebagai pengeluaran)`,
+      BACK_MENU,
+    );
+  }
+
   const { category, note } = resolveCategory(tgl.rest);
   await addEntry(env, uid, { kind: flow.kind, amount: flow.amount, note, category, ts: tgl.ts || 0, src: "teks" });
   const label = flow.kind === "masuk" ? "Pemasukan" : "Pengeluaran";
@@ -252,6 +269,7 @@ async function recordFlow(env, chatId, uid, text) {
 async function handleModeInput(env, chatId, uid, mode, text) {
   if (mode === "keluar") return recordFlow(env, chatId, uid, text);
   if (mode === "masuk") return recordFlow(env, chatId, uid, "+" + text.replace(/^\+/, ""));
+  if (mode === "mutasi") return recordFlow(env, chatId, uid, "tarik " + text);
   if (mode === "hutang") return handleDebt(env, chatId, uid, "hutang", text);
   if (mode === "piutang") return handleDebt(env, chatId, uid, "piutang", text);
   if (mode.startsWith("edit_amount:")) {
@@ -317,6 +335,17 @@ async function handleReceiptPhoto(env, chatId, msg, mode) {
     return sendMessage(env, chatId, `🟢 Pemasukan (struk): ${fmtRp(result.amount)} — ${note}`, BACK_MENU);
   }
 
+  if (cls.kind === "mutasi") {
+    const note = cls.note || "tarik tunai";
+    await addEntry(env, uid, { kind: "mutasi", amount: result.amount, note, src: "foto" });
+    return sendMessage(
+      env,
+      chatId,
+      `💵 Tarik tunai (struk): ${fmtRp(result.amount)} — ${note}\n(tidak dihitung sebagai pengeluaran)`,
+      BACK_MENU,
+    );
+  }
+
   // default: pengeluaran
   const note = cls.note || result.toko || "struk";
   const category = categorize(note);
@@ -345,9 +374,13 @@ function classifyPhoto(caption, mode) {
     const party = parts.shift() || "";
     return { kind: m[1].toLowerCase(), party, note: parts.join(" ") };
   }
+  if (/^(tarik\s*tunai|tarik|tunai)\b/i.test(cap)) {
+    return { kind: "mutasi", note: cap.replace(/^(tarik\s*tunai|tarik|tunai)\s*/i, "") };
+  }
   if (/^(masuk|pemasukan|\+)/i.test(cap)) {
     return { kind: "masuk", note: cap.replace(/^(masuk|pemasukan|\+)\s*/i, "") };
   }
+  if (mode === "mutasi") return { kind: "mutasi", note: cap };
   if (mode === "hutang" || mode === "piutang") {
     const parts = cap.split(/\s+/).filter(Boolean);
     const party = parts.shift() || "";
@@ -975,7 +1008,12 @@ async function deleteLast(env, chatId, uid) {
 // ---------------------------------------------------------------------------
 
 function entryIcon(e) {
-  return e.kind === "masuk" ? "🟢" : e.kind === "keluar" ? "🔴" : e.kind === "hutang" ? "📕" : "📗";
+  if (e.kind === "masuk") return "🟢";
+  if (e.kind === "keluar") return "🔴";
+  if (e.kind === "hutang") return "📕";
+  if (e.kind === "piutang") return "📗";
+  if (e.kind === "mutasi") return "💵";
+  return "•";
 }
 
 // Daftar catatan terbaru sebagai tombol untuk diedit.
@@ -1100,7 +1138,9 @@ function helpText() {
     "",
     "Pengeluaran: 50rb makan siang  (atau -50rb makan)",
     "Pemasukan  : +5jt gaji  (pakai tanda +)",
+    "Tarik tunai: tarik 500rb  (tidak dihitung pengeluaran)",
     "Foto struk : kirim fotonya (jadi pengeluaran)",
+    "  caption 'piutang andi' / 'hutang budi' / 'tarik' untuk jenis lain",
     "Kategori   : otomatis; paksa dgn #tag (mis. 100rb #arisan)",
     "Tanggal    : tambah 'tgl 15-3-2025' utk backdate",
     "",
@@ -1162,6 +1202,7 @@ const MENU_CATAT = {
         { text: "🔴 + Keluar", callback_data: "add_keluar" },
         { text: "🟢 + Masuk", callback_data: "add_masuk" },
       ],
+      [{ text: "💵 Tarik tunai", callback_data: "add_mutasi" }],
       [BACK_BTN],
     ],
   },
@@ -1303,7 +1344,10 @@ function capitalize(s) {
 function parseFlow(text) {
   let kind = "keluar";
   let t = text;
-  if (t.startsWith("+")) {
+  if (/^(tarik\s*tunai|tarik|tunai)\b/i.test(t)) {
+    kind = "mutasi"; // tarik tunai: pindah rekening->cash, bukan pengeluaran
+    t = t.replace(/^(tarik\s*tunai|tarik|tunai)\s*/i, "");
+  } else if (t.startsWith("+")) {
     kind = "masuk";
     t = t.slice(1).trim();
   } else if (t.startsWith("-")) {
