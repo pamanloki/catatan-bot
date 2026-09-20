@@ -27,9 +27,18 @@ Bot Telegram untuk mencatat keuangan pribadi, jalan di **Cloudflare Worker**.
    | `TELEGRAM_SECRET` | string acak bebas (disarankan) |
    | `ALLOWED_IDS` | ID Telegram-mu, dipisah koma (untuk privat) |
 
+   | `GEMINI_API_KEY` | (opsional) API key Google Gemini — baca struk **jauh lebih akurat** daripada Workers AI |
+
 3. **Bindings** (Settings → Bindings):
    - **KV Namespace** → buat namespace baru → bind ke variable name **`EXPENSES`**
-   - **Workers AI** → bind ke variable name **`AI`**
+   - **Workers AI** → bind ke variable name **`AI`** (dipakai untuk struk kalau tidak ada `GEMINI_API_KEY`)
+
+### Baca struk lebih akurat (Gemini, gratis)
+
+Model vision gratis Cloudflare kurang jago baca angka di struk. Untuk hasil jauh lebih baik:
+1. Buat API key gratis di **Google AI Studio** (https://aistudio.google.com/apikey).
+2. Tambah sebagai **Secret** `GEMINI_API_KEY` di Worker.
+3. Bot otomatis pakai Gemini untuk baca struk; Workers AI jadi cadangan.
 
 4. **Deploy** ulang setelah menambah secret/binding.
 

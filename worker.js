@@ -16,7 +16,8 @@
 //
 // Siapkan di dashboard Cloudflare Worker:
 //   Secrets: BOT_TOKEN (wajib), TELEGRAM_SECRET (disarankan), ALLOWED_IDS (privat)
-//   Bindings: KV Namespace -> "EXPENSES" ; Workers AI -> "AI"
+//            GEMINI_API_KEY (opsional, baca struk jauh lebih akurat drpd Workers AI)
+//   Bindings: KV Namespace -> "EXPENSES" ; Workers AI -> "AI" (cadangan struk)
 
 const WIB_OFFSET_MS = 7 * 60 * 60 * 1000; // Asia/Jakarta (UTC+7)
 const AI_VISION_MODEL = "@cf/meta/llama-3.2-11b-vision-instruct";
@@ -112,12 +113,21 @@ async function routeMessage(env, chatId, msg) {
 }
 
 // ---------------------------------------------------------------------------
-// Foto struk (Workers AI)
+// Foto struk (Gemini kalau ada GEMINI_API_KEY, jika tidak Workers AI)
 // ---------------------------------------------------------------------------
 
+const RECEIPT_PROMPT =
+  "Ini foto struk belanja Indonesia. Baca dengan teliti. " +
+  "Ambil TOTAL akhir yang benar-benar dibayar — cari baris berlabel " +
+  "TOTAL, GRAND TOTAL, TOTAL BAYAR, TOTAL BELANJA, atau TUNAI/BAYAR. " +
+  "Jangan tertukar dengan subtotal, kembalian, atau pajak. " +
+  "Ambil juga nama toko/merchant (biasanya di bagian paling atas struk). " +
+  'Balas HANYA JSON tanpa penjelasan apa pun: {"total": <angka rupiah, hanya digit tanpa titik/koma>, "toko": "<nama toko>"}. ' +
+  "Kalau total tidak terbaca, isi 0.";
+
 async function handleReceiptPhoto(env, chatId, msg) {
-  if (!env.AI) {
-    return sendMessage(env, chatId, "Fitur foto struk belum aktif (binding Workers AI 'AI' belum diset).");
+  if (!env.AI && !env.GEMINI_API_KEY) {
+    return sendMessage(env, chatId, "Fitur foto struk belum aktif (binding Workers AI 'AI' atau GEMINI_API_KEY belum diset).");
   }
   await sendMessage(env, chatId, "📸 Membaca struk...");
 
@@ -129,7 +139,7 @@ async function handleReceiptPhoto(env, chatId, msg) {
     return sendMessage(
       env,
       chatId,
-      "Maaf, total di struk tidak terbaca. Coba foto lebih jelas, atau ketik manual (mis. '50rb belanja').",
+      "Maaf, total di struk tidak terbaca. Coba foto lebih jelas & lurus, atau ketik manual (mis. '50rb belanja').",
     );
   }
 
@@ -144,23 +154,65 @@ async function handleReceiptPhoto(env, chatId, msg) {
   );
 }
 
+// Pilih mesin OCR: Gemini (akurat) kalau key ada, kalau tidak Workers AI.
 async function readReceipt(env, arrayBuffer) {
-  const prompt =
-    "Ini foto struk belanja Indonesia. Temukan TOTAL akhir yang dibayar dan nama tokonya. " +
-    'Balas HANYA JSON tanpa penjelasan: {"total": <angka rupiah tanpa titik/koma>, "toko": "<nama toko>"}. ' +
-    "Kalau tidak yakin, isi total dengan 0.";
+  if (env.GEMINI_API_KEY) {
+    const g = await readReceiptGemini(env, arrayBuffer);
+    if (g && g.amount) return g;
+    // kalau Gemini gagal & Workers AI tersedia, coba cadangan
+    if (env.AI) return readReceiptWorkersAI(env, arrayBuffer);
+    return g;
+  }
+  return readReceiptWorkersAI(env, arrayBuffer);
+}
+
+async function readReceiptGemini(env, arrayBuffer) {
+  const model = (env.GEMINI_MODEL || "gemini-2.0-flash").trim();
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${env.GEMINI_API_KEY}`;
+  const body = {
+    contents: [
+      {
+        parts: [
+          { text: RECEIPT_PROMPT },
+          { inline_data: { mime_type: "image/jpeg", data: abToBase64(arrayBuffer) } },
+        ],
+      },
+    ],
+    generationConfig: { temperature: 0, maxOutputTokens: 256 },
+  };
+  let text = "";
+  try {
+    const r = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const j = await r.json();
+    const parts = j && j.candidates && j.candidates[0] && j.candidates[0].content && j.candidates[0].content.parts;
+    text = (parts || []).map((p) => p.text || "").join("");
+  } catch {
+    return null;
+  }
+  return parseReceiptJson(text);
+}
+
+async function readReceiptWorkersAI(env, arrayBuffer) {
   let out;
   try {
     out = await env.AI.run(AI_VISION_MODEL, {
       image: [...new Uint8Array(arrayBuffer)],
-      prompt,
+      prompt: RECEIPT_PROMPT,
       max_tokens: 256,
     });
   } catch {
     return null;
   }
-  const raw = (out && (out.response || out.description || "")) + "";
-  const m = raw.match(/\{[\s\S]*\}/);
+  return parseReceiptJson((out && (out.response || out.description || "")) + "");
+}
+
+// Ekstrak {total, toko} dari teks balasan AI.
+function parseReceiptJson(text) {
+  const m = (text || "").match(/\{[\s\S]*\}/);
   if (!m) return null;
   try {
     const j = JSON.parse(m[0]);
@@ -170,6 +222,17 @@ async function readReceipt(env, arrayBuffer) {
   } catch {
     return null;
   }
+}
+
+// ArrayBuffer -> base64 (untuk kirim gambar ke Gemini).
+function abToBase64(buf) {
+  const bytes = new Uint8Array(buf);
+  let bin = "";
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    bin += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+  }
+  return btoa(bin);
 }
 
 async function getTelegramFile(env, fileId) {
