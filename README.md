@@ -1,68 +1,84 @@
 # catatan-bot
 
-Bot Telegram untuk mencatat keuangan pribadi, jalan di **Cloudflare Worker**.
+Bot Telegram untuk mencatat keuangan pribadi, berjalan di **Cloudflare Worker**.
+Seluruh logika ada di satu file: `worker.js` (tanpa framework/dependency).
 
-- 🔴 **Pengeluaran**: `50rb makan siang`, `12000 parkir`
-- 🟢 **Pemasukan**: `+5jt gaji` (awali dengan tanda `+`)
-- 📸 **Foto struk**: kirim foto → total & toko dibaca **Workers AI** (jadi pengeluaran)
-- 📕 **Hutang** (kamu pinjam): `/hutang 100rb budi beli bensin` — bisa set tanggal: `... tgl 15-3-2025`
-- 📗 **Piutang** (orang pinjam ke kamu): `/piutang 50rb ani`
-- 📈 **Grafik** pai per kategori: `/grafik`
-- 📅 **Laporan bulan tertentu**: `/laporan agustus` atau `/laporan 2026-08`
-- 🔍 **Cari** transaksi: `/cari grab`
-- 👛 **Dompet**: lacak saldo per tempat uang (Cash, Bank, GoPay…). Tag `@gopay` di catatan, `/saldo`, `/dompet` (tambah/hapus/utama), `pindah 200rb bank gopay`. Tarik tunai otomatis pindah Bank→Cash.
-- ✅ **Lunasi**: `/lunas` (lihat daftar), `/lunas 2` (lunasi nomor 2)
-- 🎯 **Budget bulanan**: `/budget 3jt` set batas, peringatan otomatis saat mendekati/lewat; tiap catat pengeluaran langsung tampil sisa budget
-- 🏷️ **Kategori otomatis** dari kata kunci (atau paksa dengan `#tag`), lengkap dengan rekap per kategori di laporan
-- 📊 `/laporan` rekap hari & bulan ini (masuk, keluar, saldo, per kategori, hutang/piutang)
-- 💰 `/total` total sepanjang waktu
-- 📄 `/export` unduh **CSV** (buka rapi di Excel / Google Sheets)
-- 🗑️ `/hapus` hapus catatan terakhir
-- 🔒 Bisa dikunci privat lewat `ALLOWED_IDS`
+## Fitur
+
+**Mencatat**
+- 🔴 Pengeluaran: `50rb makan siang` (atau `-50rb makan`)
+- 🟢 Pemasukan: `+5jt gaji` (awali `+`)
+- 💵 Tarik tunai: `tarik 500rb` (Bank→Cash, **bukan** pengeluaran)
+- 🧾 Foto struk / transfer / e-wallet: kirim fotonya, nominal dibaca AI
+- Opsi saat mencatat: dompet `@gopay`, tanggal `tgl 15-3-2025`, kategori `#tag`
+
+**Hutang / Piutang**
+- 📕 `/hutang 100rb budi bensin` · 📗 `/piutang 50rb ani` (bisa `+ tgl`)
+- 📋 `/utang` rekap · ✅ `/lunas` lihat & lunasi (tap tombol)
+
+**Dompet** 👛
+- Lacak saldo per tempat uang (Cash, Bank, GoPay, …)
+- `/saldo` · `/dompet` (tambah/hapus/utama/**saldo awal**) · `pindah 200rb bank gopay`
+
+**Budget** 🎯
+- `/budget 3jt` set batas bulanan; peringatan otomatis saat mendekati/lewat
+
+**Laporan & data**
+- 📊 `/laporan` (hari & bulan ini, per kategori) · `/laporan agustus` (bulan tertentu)
+- 📈 `/grafik` pai per kategori · 🔍 `/cari grab` · 💰 `/total` · 📄 `/export` CSV
+- 🗓️ Rekap bulan lalu dikirim **otomatis** tiap awal bulan (Cron)
+
+**Kelola & lainnya**
+- ✏️ `/edit` ubah/hapus catatan · `/hapus` · `/hapusall`
+- 📱 `/menu` tombol cepat · `/setup` daftarkan menu perintah Telegram
+- 🔒 Privat lewat `ALLOWED_IDS`
 
 ## Setup (via dashboard Cloudflare, tanpa Wrangler)
 
-1. **Buat Worker** baru → **Edit code** → tempel isi `worker.js` → **Deploy**.
+1. **Buat Worker** → **Edit code** → tempel isi `worker.js` → **Deploy**.
 
 2. **Secrets** (Settings → Variables and Secrets, tipe **Secret**):
+
    | Name | Value |
    |------|-------|
    | `BOT_TOKEN` | token dari @BotFather (wajib) |
    | `TELEGRAM_SECRET` | string acak bebas (disarankan) |
    | `ALLOWED_IDS` | ID Telegram-mu, dipisah koma (untuk privat) |
-
-   | `GEMINI_API_KEY` | (opsional) API key Google Gemini — baca struk **jauh lebih akurat** daripada Workers AI |
+   | `GEMINI_API_KEY` | opsional — baca struk **jauh lebih akurat** (lihat bawah) |
+   | `GEMINI_MODEL` | opsional — default `gemini-3.6-flash` |
 
 3. **Bindings** (Settings → Bindings):
-   - **KV Namespace** → buat namespace baru → bind ke variable name **`EXPENSES`**
-   - **Workers AI** → bind ke variable name **`AI`** (dipakai untuk struk kalau tidak ada `GEMINI_API_KEY`)
+   - **KV Namespace** → buat namespace → bind ke variable **`EXPENSES`**
+   - **Workers AI** → bind ke variable **`AI`** (cadangan pembaca struk)
 
-### Baca struk lebih akurat (Gemini, gratis)
-
-Model vision gratis Cloudflare kurang jago baca angka di struk. Untuk hasil jauh lebih baik:
-1. Buat API key gratis di **Google AI Studio** (https://aistudio.google.com/apikey).
-2. Tambah sebagai **Secret** `GEMINI_API_KEY` di Worker.
-3. Bot otomatis pakai Gemini untuk baca struk; Workers AI jadi cadangan.
-
-4. **Deploy** ulang setelah menambah secret/binding.
+4. **Deploy** ulang setiap kali menambah secret/binding.
 
 5. **Daftarkan webhook** (buka di browser, ganti `<...>`):
    ```
    https://api.telegram.org/bot<BOT_TOKEN>/setWebhook?url=<WORKER_URL>&secret_token=<TELEGRAM_SECRET>
    ```
 
-## Rekap bulanan otomatis (Cron)
+6. Kirim `/start` ke bot, lalu `/setup` sekali agar tombol menu Telegram aktif.
 
-Bot bisa mengirim laporan bulan lalu otomatis tiap awal bulan.
+### Baca struk lebih akurat (Gemini, gratis)
+
+Model vision gratis Cloudflare kurang jago baca angka struk. Untuk hasil jauh lebih baik:
+1. Buat API key gratis di **Google AI Studio** — https://aistudio.google.com/apikey
+2. Tambahkan sebagai Secret `GEMINI_API_KEY`, lalu Deploy.
+3. Bot otomatis pakai Gemini untuk baca struk; Workers AI jadi cadangan.
+
+### Rekap bulanan otomatis (Cron)
+
 1. Worker → **Settings → Triggers → Cron Triggers → Add Cron Trigger**.
-2. Isi jadwal: `0 0 1 * *` (tanggal 1 tiap bulan, 00:00 UTC = 07:00 WIB).
-3. **Deploy**.
+2. Jadwal: `0 0 1 * *` (tanggal 1 tiap bulan, 00:00 UTC = 07:00 WIB) → **Deploy**.
 
-Handler `scheduled` di worker akan mengirim rekap bulan sebelumnya ke tiap pengguna yang punya transaksi. (Aman kalau cron diisi harian `0 0 * * *` juga — bot hanya mengirim saat tanggal 1.)
+Handler `scheduled` mengirim rekap bulan lalu ke tiap pengguna yang punya transaksi.
+(Aman juga kalau diisi harian `0 0 * * *` — bot hanya mengirim saat tanggal 1.)
 
 ## Catatan
 
-- Data disimpan di **Cloudflare KV** (gratis di tier dasar), per user Telegram.
-- Foto struk memakai **Workers AI** (jatah gratis harian); akurasi tergantung kejelasan foto.
-- Export memakai **CSV**, bukan PDF: membuat PDF di dalam Worker butuh library berat, sedangkan CSV ringan & langsung rapi saat dibuka di Excel/Google Sheets.
+- Data & pengaturan disimpan di **Cloudflare KV** (gratis di tier dasar), per user Telegram.
+- Foto struk memakai **Gemini** (jika ada key) atau **Workers AI**; akurasi tergantung kejelasan foto.
+- Export memakai **CSV** (bukan PDF): PDF di Worker butuh library berat, CSV ringan & langsung rapi di Excel/Google Sheets.
+- Saldo dompet dihitung dari transaksi (masuk/keluar/transfer); set titik awal dengan `/dompet saldo <nama> <jumlah>`.
 - Zona waktu **WIB (UTC+7)**.
