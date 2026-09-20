@@ -258,7 +258,8 @@ async function recordFlow(env, chatId, uid, text) {
   }
   const cfg = await getConfig(env, uid);
   const tgl = parseTanggal(flow.note);
-  const tglTeks = tgl.ts ? `\n🗓️ ${namaHariTanggal(tgl.ts)}` : "";
+  const ts = tgl.ts || Date.now();
+  const waktu = `\n🗓️ ${namaHariTanggal(ts)} · ${jamPendek(ts)}`;
 
   // Mutasi: tarik tunai / pindah antar dompet. Tidak dihitung pengeluaran.
   if (flow.kind === "mutasi") {
@@ -276,11 +277,11 @@ async function recordFlow(env, chatId, uid, text) {
       to = cashWallet(cfg);
       note = tgl.rest || "tarik tunai";
     }
-    await addEntry(env, uid, { kind: "mutasi", amount: flow.amount, note, from, to, ts: tgl.ts || 0, src: "teks" });
+    await addEntry(env, uid, { kind: "mutasi", amount: flow.amount, note, from, to, ts, src: "teks" });
     return sendMessage(
       env,
       chatId,
-      `💵 ${fmtRp(flow.amount)} — ${from} → ${to}${tglTeks}\n(pindah dompet, bukan pengeluaran)`,
+      `💵 ${fmtRp(flow.amount)} — ${from} → ${to}${waktu}\n(pindah dompet, bukan pengeluaran)`,
       BACK_MENU,
     );
   }
@@ -289,17 +290,17 @@ async function recordFlow(env, chatId, uid, text) {
   const w = extractWallet(tgl.rest, cfg);
   const wallet = w.wallet || cfg.defaultWallet;
   const { category, note } = resolveCategory(w.rest);
-  await addEntry(env, uid, { kind: flow.kind, amount: flow.amount, note, category, wallet, ts: tgl.ts || 0, src: "teks" });
+  await addEntry(env, uid, { kind: flow.kind, amount: flow.amount, note, category, wallet, ts, src: "teks" });
   const label = flow.kind === "masuk" ? "Pemasukan" : "Pengeluaran";
   const icon = flow.kind === "masuk" ? "🟢" : "🔴";
   if (flow.kind === "masuk") {
-    return sendMessage(env, chatId, `${icon} ${label} tercatat: ${fmtRp(flow.amount)} — ${note} (${wallet})${tglTeks}`, BACK_MENU);
+    return sendMessage(env, chatId, `${icon} ${label} tercatat: ${fmtRp(flow.amount)} — ${note} (${wallet})${waktu}`, BACK_MENU);
   }
   const extra = await spendingSummaryLines(env, uid);
   return sendMessage(
     env,
     chatId,
-    [`${icon} ${label} tercatat: ${fmtRp(flow.amount)} — ${note} [${category}] (${wallet})${tglTeks}`, ...extra].join("\n"),
+    [`${icon} ${label} tercatat: ${fmtRp(flow.amount)} — ${note} [${category}] (${wallet})${waktu}`, ...extra].join("\n"),
     BACK_MENU,
   );
 }
@@ -594,31 +595,41 @@ async function handleDebt(env, chatId, uid, kind, args) {
   const party = parts.shift() || "-";
   const note = parts.join(" ") || "(tanpa keterangan)";
 
+  const ts = tgl.ts || Date.now();
   await addEntry(env, uid, {
-    kind, amount: p.amount, note, party, status: "belum", ts: tgl.ts || 0, src: "teks",
+    kind, amount: p.amount, note, party, status: "belum", ts, src: "teks",
   });
   const label =
     kind === "hutang"
       ? `📕 Hutang dicatat: kamu pinjam ${fmtRp(p.amount)} ke ${party}`
       : `📗 Piutang dicatat: ${party} pinjam ${fmtRp(p.amount)} ke kamu`;
-  const tglTeks = tgl.ts ? `\n🗓️ Tanggal: ${namaHariTanggal(tgl.ts)}` : "";
-  return sendMessage(env, chatId, `${label}${note ? ` (${note})` : ""}${tglTeks}`);
+  const waktu = `\n🗓️ ${namaHariTanggal(ts)} · ${jamPendek(ts)}`;
+  return sendMessage(env, chatId, `${label}${note ? ` (${note})` : ""}${waktu}`, BACK_MENU);
 }
 
 // Ambil tanggal kejadian dari teks: "tgl 15-3-2025", "tanggal 15/3", "pada 1 1 2024".
 // Kembalikan { ts, rest }. Kalau tanpa tahun -> pakai tahun sekarang.
 function parseTanggal(s) {
-  const m = s.match(/(?:tgl|tanggal|pada)\s*[:=]?\s*(\d{1,2})[-/ ](\d{1,2})(?:[-/ ](\d{2,4}))?/i);
+  const m = s.match(/(?:tgl|tanggal|pada)\s*[:=]?\s*(\d{1,2})[-/ ](\d{1,2})(?:[-/ ](\d{2,4}))?(?:\s+(?:jam\s*)?(\d{1,2})[:.](\d{2}))?/i);
   if (!m) return { ts: 0, rest: s };
   const d = parseInt(m[1], 10);
   const mo = parseInt(m[2], 10);
   let y = m[3] ? parseInt(m[3], 10) : wibParts(Date.now()).y;
   if (y < 100) y += 2000;
   if (!d || d > 31 || !mo || mo > 12) return { ts: 0, rest: s };
-  // Tengah hari WIB pada tanggal itu (aman dari geser zona waktu).
-  const ts = Date.UTC(y, mo - 1, d, 12, 0, 0) - WIB_OFFSET_MS;
+  // Jam opsional; kalau tak ditulis pakai tengah hari (aman dari geser zona waktu).
+  let hh = 12, mm = 0;
+  if (m[4] != null) { hh = parseInt(m[4], 10); mm = parseInt(m[5], 10); }
+  if (hh > 23 || mm > 59) { hh = 12; mm = 0; }
+  const ts = Date.UTC(y, mo - 1, d, hh, mm, 0) - WIB_OFFSET_MS;
   const rest = (s.slice(0, m.index) + s.slice(m.index + m[0].length)).replace(/\s+/g, " ").trim();
   return { ts, rest };
+}
+
+// Jam singkat "14:30" (WIB).
+function jamPendek(ts) {
+  const d = new Date(ts + WIB_OFFSET_MS);
+  return `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}`;
 }
 
 // Tanggal singkat "15/03/2025" untuk ditampilkan di daftar.
@@ -640,7 +651,7 @@ async function listOpenDebts(env, chatId, uid, kind) {
   open.forEach((e) => {
     const n = openAll.findIndex((x) => x.ts === e.ts) + 1;
     total += e.amount;
-    lines.push(`${n}. ${fmtRp(e.amount)} — ${e.party} (${e.note}) · ${tglPendek(e.ts)}`);
+    lines.push(`${n}. ${fmtRp(e.amount)} — ${e.party} (${e.note}) · ${tglPendek(e.ts)} ${jamPendek(e.ts)}`);
   });
   lines.push("", `Total: ${fmtRp(total)}`, "", "Lunasi dengan: /lunas <nomor>");
   return sendMessage(env, chatId, lines.join("\n"));
@@ -669,14 +680,14 @@ async function sendDebtReport(env, chatId, uid, markup) {
 
   lines.push(`📕 Hutang (kamu pinjam) — ${fmtRp(totalH)}`);
   if (hutang.length) {
-    for (const e of hutang) lines.push(`• ${fmtRp(e.amount)} — ${e.party} (${e.note}) · ${tglPendek(e.ts)}`);
+    for (const e of hutang) lines.push(`• ${fmtRp(e.amount)} — ${e.party} (${e.note}) · ${tglPendek(e.ts)} ${jamPendek(e.ts)}`);
   } else {
     lines.push("• (tidak ada)");
   }
 
   lines.push("", `📗 Piutang (orang pinjam) — ${fmtRp(totalP)}`);
   if (piutang.length) {
-    for (const e of piutang) lines.push(`• ${fmtRp(e.amount)} — ${e.party} (${e.note}) · ${tglPendek(e.ts)}`);
+    for (const e of piutang) lines.push(`• ${fmtRp(e.amount)} — ${e.party} (${e.note}) · ${tglPendek(e.ts)} ${jamPendek(e.ts)}`);
   } else {
     lines.push("• (tidak ada)");
   }
@@ -903,7 +914,7 @@ async function sendReport(env, chatId, uid, markup, arg) {
     lines.push("", "Rincian hari ini:");
     for (const e of hariIni) {
       const icon = e.kind === "masuk" ? "🟢" : "🔴";
-      lines.push(`${icon} ${fmtRp(e.amount)} — ${e.note}${e.src === "foto" ? " 🧾" : ""}`);
+      lines.push(`${icon} ${jamPendek(e.ts)} · ${fmtRp(e.amount)} — ${e.note}${e.src === "foto" ? " 🧾" : ""}`);
     }
   }
   lines.push("", "Export lengkap: /export");
@@ -1009,7 +1020,7 @@ async function handleCari(env, chatId, uid, kw, markup) {
   for (const e of hit.slice(0, 30)) {
     const icon = e.kind === "masuk" ? "🟢" : e.kind === "keluar" ? "🔴" : "📘";
     if (e.kind === "keluar") total += e.amount;
-    lines.push(`${icon} ${tglPendek(e.ts)} — ${fmtRp(e.amount)} — ${e.note}${e.party ? " / " + e.party : ""}`);
+    lines.push(`${icon} ${tglPendek(e.ts)} ${jamPendek(e.ts)} — ${fmtRp(e.amount)} — ${e.note}${e.party ? " / " + e.party : ""}`);
   }
   if (hit.length > 30) lines.push(`… dan ${hit.length - 30} lagi`);
   lines.push("", `Total pengeluaran cocok: ${fmtRp(total)}`);
@@ -1525,7 +1536,7 @@ async function sendEditOptions(env, chatId, uid, ts) {
   const list = await getEntries(env, uid);
   const e = list.find((x) => x.ts === ts);
   if (!e) return sendMessage(env, chatId, "Catatan tidak ditemukan (mungkin sudah dihapus).", BACK_MENU);
-  const info = `${entryIcon(e)} ${fmtRp(e.amount)} — ${e.note}${e.party ? " / " + e.party : ""}\n🗓️ ${tglPendek(e.ts)}`;
+  const info = `${entryIcon(e)} ${fmtRp(e.amount)} — ${e.note}${e.party ? " / " + e.party : ""}\n🗓️ ${tglPendek(e.ts)} · ${jamPendek(e.ts)}`;
   const rows = [
     [
       { text: "✏️ Nominal", callback_data: `ea:${ts}` },
@@ -1730,7 +1741,7 @@ function helpText() {
     "",
     "Opsi tambahan saat mencatat:",
     "• Dompet   : @nama   → 50rb makan @gopay",
-    "• Tanggal  : tgl DD-MM-YYYY → 50rb makan tgl 15-3-2025",
+    "• Tanggal  : tgl DD-MM-YYYY [jam HH:MM] → 50rb makan tgl 15-3-2025 14:30",
     "• Kategori : otomatis; paksa dgn #tag → 100rb #arisan",
     "• Caption foto: 'piutang andi' / 'hutang budi' / 'tarik' / 'masuk'",
     "",
