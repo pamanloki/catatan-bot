@@ -1281,6 +1281,19 @@ function buildExcel(list, cfg) {
   sRows.push([tlabel("TOTAL"), numT(gM), numT(gK), numT(gM - gK)]);
   sRows.push([]);
   sRows.push([bcell("Saldo akhir (semua dompet)"), e5(), e5(), numT(saldo)]);
+
+  // Hutang/piutang belum lunas — terpisah, TIDAK dicampur ke Masuk/Keluar.
+  let openH = 0, openP = 0;
+  for (const e of list) {
+    if (e.kind === "hutang" && e.status === "belum") openH += e.amount;
+    if (e.kind === "piutang" && e.status === "belum") openP += e.amount;
+  }
+  if (openH || openP) {
+    sRows.push([]);
+    sRows.push([{ v: "Belum lunas (di luar arus kas)", s: 1 }, { v: "", s: 1 }, { v: "", s: 1 }, { v: "", s: 1 }]);
+    sRows.push([cell("Hutang (kamu pinjam)"), e5(), e5(), numR(openH)]);
+    sRows.push([cell("Piutang (orang pinjam)"), e5(), e5(), numG(openP)]);
+  }
   const summarySheet = { name: "Ringkasan", rows: sRows, opts: { freeze: true } };
 
   if (!monthSheets.length) return xlsxPackage([summarySheet]);
