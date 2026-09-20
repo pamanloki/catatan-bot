@@ -137,6 +137,13 @@ async function handleCallback(env, cq) {
     if (data === "dorestore") return doRestore(env, chatId, uid);
     if (data === "ai_on") return handleAi(env, chatId, uid, "on");
     if (data === "ai_off") return handleAi(env, chatId, uid, "off");
+    if (data === "del_last") return deleteLast(env, chatId, uid, BACK_MENU);
+    if (data === "del_all") {
+      return sendMessage(env, chatId, "⚠️ Hapus SEMUA catatan? Tidak bisa dibatalkan.\nSaran: /backup dulu.", {
+        reply_markup: { inline_keyboard: [[{ text: "✅ Ya, hapus semua", callback_data: "del_all_yes" }], [{ text: "Batal", callback_data: "menu" }]] },
+      });
+    }
+    if (data === "del_all_yes") return doHapusAll(env, chatId, uid, BACK_MENU);
     switch (data) {
       case "menu": return sendMenu(env, chatId);
       // Submenu kategori
@@ -1544,19 +1551,19 @@ async function confirmHapusAll(env, chatId, uid) {
   );
 }
 
-async function doHapusAll(env, chatId, uid) {
+async function doHapusAll(env, chatId, uid, markup) {
   const list = await getEntries(env, uid);
   const n = list.length;
   await saveEntries(env, uid, []);
-  return sendMessage(env, chatId, `🗑️ Semua catatan dihapus (${n} entri).`);
+  return sendMessage(env, chatId, `🗑️ Semua catatan dihapus (${n} entri).`, markup);
 }
 
-async function deleteLast(env, chatId, uid) {
+async function deleteLast(env, chatId, uid, markup) {
   const list = await getEntries(env, uid);
-  if (!list.length) return sendMessage(env, chatId, "Tidak ada catatan untuk dihapus.");
+  if (!list.length) return sendMessage(env, chatId, "Tidak ada catatan untuk dihapus.", markup);
   const last = list.pop();
   await saveEntries(env, uid, list);
-  return sendMessage(env, chatId, `🗑️ Dihapus: ${last.kind} ${fmtRp(last.amount)} — ${last.note}`);
+  return sendMessage(env, chatId, `🗑️ Dihapus: ${entryIcon(last)} ${fmtRp(last.amount)} — ${last.note}`, markup);
 }
 
 // ---------------------------------------------------------------------------
@@ -1847,17 +1854,27 @@ function helpText() {
 const BACK_BTN = { text: "🔙 Menu", callback_data: "menu" };
 const BACK_MENU = { reply_markup: { inline_keyboard: [[BACK_BTN]] } };
 
-// Menu utama: pilih kategori dulu.
+// Menu utama: aksi cepat di atas, lalu kategori.
 const MENU_MAIN = {
   reply_markup: {
     inline_keyboard: [
+      // Aksi tercepat (1 tap)
       [
-        { text: "➕ Catat", callback_data: "cat_catat" },
-        { text: "📊 Laporan", callback_data: "cat_laporan" },
+        { text: "🔴 Keluar", callback_data: "add_keluar" },
+        { text: "🟢 Masuk", callback_data: "add_masuk" },
+      ],
+      [
+        { text: "📊 Laporan", callback_data: "laporan" },
+        { text: "👛 Saldo", callback_data: "saldo" },
+      ],
+      // Kategori (buka submenu)
+      [
+        { text: "➕ Catat lainnya", callback_data: "cat_catat" },
+        { text: "📈 Laporan & data", callback_data: "cat_laporan" },
       ],
       [
         { text: "📋 Hutang/Piutang", callback_data: "cat_utang" },
-        { text: "👛 Dompet", callback_data: "cat_dompet" },
+        { text: "💼 Dompet", callback_data: "cat_dompet" },
       ],
       [
         { text: "🎯 Budget", callback_data: "cat_budget" },
@@ -1942,17 +1959,20 @@ const MENU_LAIN = {
     inline_keyboard: [
       [
         { text: "✏️ Edit catatan", callback_data: "edit" },
-        { text: "📄 Export CSV", callback_data: "export" },
+        { text: "🗑️ Hapus terakhir", callback_data: "del_last" },
+      ],
+      [
+        { text: "🗑️ Hapus semua", callback_data: "del_all" },
+        { text: "🤖 Mesin AI", callback_data: "ai" },
       ],
       [
         { text: "🗂️ Backup", callback_data: "backup" },
         { text: "📥 Restore", callback_data: "restore" },
       ],
       [
-        { text: "🤖 Mesin AI", callback_data: "ai" },
         { text: "📆 Hari ini", callback_data: "hari" },
+        { text: "❓ Bantuan", callback_data: "help" },
       ],
-      [{ text: "❓ Bantuan", callback_data: "help" }],
       [BACK_BTN],
     ],
   },
@@ -2105,7 +2125,10 @@ function sleep(ms) {
 }
 function fmtRp(n) {
   if (n == null || !isFinite(n)) return "Rp?";
-  return "Rp" + Math.round(n).toLocaleString("id-ID");
+  const neg = n < 0;
+  // Grup ribuan pakai titik secara manual (tidak bergantung locale runtime).
+  const s = String(Math.abs(Math.round(n))).replace(/\B(?=(\d{3})+(?!\d))/g, ".");
+  return (neg ? "-" : "") + "Rp" + s;
 }
 function isAllowed(env, fromId, chatId) {
   const raw = (env.ALLOWED_IDS || "").trim();
