@@ -1108,7 +1108,8 @@ function buildExcel(list, cfg) {
 
   const HEAD = ["Tanggal", "Waktu", "Jenis", "Masuk", "Keluar", "Saldo", "Kategori", "Keterangan", "Pihak", "Dompet", "Status"];
   let saldo = 0;
-  const sheets = months.map((m) => {
+  const rekap = []; // { name, masuk, keluar } per bulan untuk sheet Ringkasan
+  const monthSheets = months.map((m) => {
     const rows = [];
     rows.push(HEAD.map((h) => ({ v: h, s: 1 }))); // header
     rows.push([bcell(""), bcell(""), bcell("Saldo awal"), null, null, num(saldo, true), null, null, null, null, null]);
@@ -1132,10 +1133,25 @@ function buildExcel(list, cfg) {
       ]);
     }
     rows.push([bcell(""), bcell(""), bcell("TOTAL"), num(tMasuk, true), num(tKeluar, true), num(saldo, true), null, null, null, null, null]);
-    return { name: m.name, rows };
+    rekap.push({ name: m.name, masuk: tMasuk, keluar: tKeluar });
+    return { name: m.name.slice(0, 31), rows };
   });
 
-  if (!sheets.length) sheets.push({ name: "Kosong", rows: [HEAD.map((h) => ({ v: h, s: 1 }))] });
+  // Sheet "Ringkasan" (paling depan): rekap semua bulan + total + saldo akhir.
+  const sRows = [];
+  sRows.push(["Bulan", "Masuk", "Keluar", "Selisih"].map((h) => ({ v: h, s: 1 })));
+  let gM = 0, gK = 0;
+  for (const r of rekap) {
+    gM += r.masuk; gK += r.keluar;
+    sRows.push([cell(r.name), num(r.masuk), num(r.keluar), num(r.masuk - r.keluar)]);
+  }
+  sRows.push([bcell("TOTAL"), num(gM, true), num(gK, true), num(gM - gK, true)]);
+  sRows.push([]);
+  sRows.push([bcell("Saldo akhir (semua dompet)"), null, null, num(saldo, true)]);
+  const summarySheet = { name: "Ringkasan", rows: sRows };
+
+  const sheets = [summarySheet, ...monthSheets];
+  if (!monthSheets.length) return xlsxPackage([summarySheet]);
   return xlsxPackage(sheets);
 }
 
