@@ -1025,15 +1025,28 @@ async function exportCsv(env, chatId, uid, markup) {
   const list = await getEntries(env, uid);
   if (!list.length) return sendMessage(env, chatId, "Belum ada catatan untuk diexport.", markup);
 
-  const header = ["Tanggal", "Waktu", "Jenis", "Jumlah", "Kategori", "Keterangan", "Pihak", "Dompet", "Status", "Sumber"];
+  const header = ["Bulan", "Tanggal", "Waktu", "Jenis", "Masuk", "Keluar", "Saldo", "Kategori", "Keterangan", "Pihak", "Dompet", "Status", "Sumber"];
   const rows = [header.map(csvCell).join(",")];
+  let saldo = 0; // saldo berjalan (total semua dompet), seperti rekening koran
   for (const e of [...list].sort((a, b) => a.ts - b.ts)) {
     const d = new Date(e.ts + WIB_OFFSET_MS);
+    const bulan = `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}`;
     const tgl = `${pad(d.getUTCDate())}/${pad(d.getUTCMonth() + 1)}/${d.getUTCFullYear()}`;
     const jam = `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}`;
     const dompet = e.kind === "mutasi" ? `${e.from || ""}→${e.to || ""}` : e.wallet || "";
+
+    // Efek ke saldo total: masuk +, keluar -, mutasi injeksi/penarikan; transfer & hutang/piutang = 0
+    let masukN = "", keluarN = "";
+    if (e.kind === "masuk") { saldo += e.amount; masukN = e.amount; }
+    else if (e.kind === "keluar") { saldo -= e.amount; keluarN = e.amount; }
+    else if (e.kind === "mutasi") {
+      if (e.to && !e.from) { saldo += e.amount; masukN = e.amount; }       // set saldo naik
+      else if (e.from && !e.to) { saldo -= e.amount; keluarN = e.amount; } // set saldo turun
+      // transfer antar dompet: saldo total tetap
+    }
+
     rows.push(
-      [tgl, jam, e.kind, e.amount, e.category || "", e.note, e.party || "", dompet, e.status || "", e.src || ""]
+      [bulan, tgl, jam, e.kind, masukN, keluarN, saldo, e.category || "", e.note, e.party || "", dompet, e.status || "", e.src || ""]
         .map(csvCell)
         .join(","),
     );
