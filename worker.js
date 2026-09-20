@@ -122,9 +122,18 @@ async function handleCallback(env, cq) {
   const uid = fromId;
   try {
     if (data.startsWith("lunasi:")) {
-      const ts = Number(data.slice(7));
-      return settleByTs(env, chatId, uid, ts, BACK_MENU);
+      return settleByTs(env, chatId, uid, Number(data.slice(7)), BACK_MENU);
     }
+    if (data.startsWith("edit:")) return sendEditOptions(env, chatId, uid, Number(data.slice(5)));
+    if (data.startsWith("ea:")) {
+      await setMode(env, uid, "edit_amount:" + data.slice(3));
+      return sendMessage(env, chatId, "✏️ Ketik nominal baru, contoh: 75rb", BACK_MENU);
+    }
+    if (data.startsWith("en:")) {
+      await setMode(env, uid, "edit_note:" + data.slice(3));
+      return sendMessage(env, chatId, "📝 Ketik keterangan baru:", BACK_MENU);
+    }
+    if (data.startsWith("del:")) return deleteByTs(env, chatId, uid, Number(data.slice(4)));
     switch (data) {
       case "menu": return sendMenu(env, chatId);
       // Submenu kategori
@@ -146,14 +155,19 @@ async function handleCallback(env, cq) {
       case "hari":
         return sendMessage(env, chatId, `📆 Sekarang: ${namaHariTanggal(Date.now())} (WIB)`, BACK_MENU);
       case "help": return sendMessage(env, chatId, helpText(), BACK_MENU);
+      case "edit": return sendEditList(env, chatId, uid);
       case "add_keluar":
-        return sendMessage(env, chatId, "Ketik pengeluaran, contoh:\n50rb makan siang\n20rb grab", BACK_MENU);
+        await setMode(env, uid, "keluar");
+        return sendMessage(env, chatId, "🔴 Ketik pengeluaran (langsung, tanpa perintah):\ncontoh: 50rb makan siang\n(tanggal opsional: 50rb makan tgl 15-3)", BACK_MENU);
       case "add_masuk":
-        return sendMessage(env, chatId, "Ketik pemasukan (pakai +), contoh:\n+5jt gaji", BACK_MENU);
+        await setMode(env, uid, "masuk");
+        return sendMessage(env, chatId, "🟢 Ketik pemasukan (langsung):\ncontoh: 5jt gaji", BACK_MENU);
       case "add_hutang":
-        return sendMessage(env, chatId, "Ketik, contoh:\n/hutang 100rb budi bensin", BACK_MENU);
+        await setMode(env, uid, "hutang");
+        return sendMessage(env, chatId, "📕 Ketik: nominal nama [ket] [tgl]\ncontoh: 100rb budi bensin tgl 15-3-2025", BACK_MENU);
       case "add_piutang":
-        return sendMessage(env, chatId, "Ketik, contoh:\n/piutang 50rb ani", BACK_MENU);
+        await setMode(env, uid, "piutang");
+        return sendMessage(env, chatId, "📗 Ketik: nominal nama [ket] [tgl]\ncontoh: 50rb ani tgl 15-3-2025", BACK_MENU);
     }
   } catch (e) {
     return sendMessage(env, chatId, "Error: " + (e && e.message ? e.message : e));
@@ -189,10 +203,23 @@ async function routeMessage(env, chatId, msg) {
   if (lower.startsWith("/budget")) return handleBudget(env, chatId, uid, text.slice(7).trim());
   if (lower.startsWith("/lunas")) return handleLunas(env, chatId, uid, text.slice(6).trim());
   if (lower.startsWith("/utang") || lower.startsWith("/rekaputang")) return sendDebtReport(env, chatId, uid);
+  if (lower.startsWith("/edit")) return sendEditList(env, chatId, uid);
   if (lower.startsWith("/hutang")) return handleDebt(env, chatId, uid, "hutang", text.slice(7).trim());
   if (lower.startsWith("/piutang")) return handleDebt(env, chatId, uid, "piutang", text.slice(8).trim());
 
+  // Kalau lagi menunggu input dari tombol (mode), proses sesuai mode itu.
+  const mode = await getMode(env, uid);
+  if (mode) {
+    await clearMode(env, uid);
+    return handleModeInput(env, chatId, uid, mode, text);
+  }
+
   // Selain perintah -> catatan arus kas (pengeluaran / pemasukan).
+  return recordFlow(env, chatId, uid, text);
+}
+
+// Catat pengeluaran/pemasukan dari teks bebas.
+async function recordFlow(env, chatId, uid, text) {
   const flow = parseFlow(text);
   if (!flow) {
     return sendMessage(
@@ -208,14 +235,33 @@ async function routeMessage(env, chatId, msg) {
   const icon = flow.kind === "masuk" ? "🟢" : "🔴";
   const tglTeks = tgl.ts ? `\n🗓️ ${namaHariTanggal(tgl.ts)}` : "";
   if (flow.kind === "masuk") {
-    return sendMessage(env, chatId, `${icon} ${label} tercatat: ${fmtRp(flow.amount)} — ${note}${tglTeks}`);
+    return sendMessage(env, chatId, `${icon} ${label} tercatat: ${fmtRp(flow.amount)} — ${note}${tglTeks}`, BACK_MENU);
   }
   const extra = await spendingSummaryLines(env, uid);
   return sendMessage(
     env,
     chatId,
     [`${icon} ${label} tercatat: ${fmtRp(flow.amount)} — ${note} [${category}]${tglTeks}`, ...extra].join("\n"),
+    BACK_MENU,
   );
+}
+
+// Proses input teks setelah menekan tombol (mode aktif).
+async function handleModeInput(env, chatId, uid, mode, text) {
+  if (mode === "keluar") return recordFlow(env, chatId, uid, text);
+  if (mode === "masuk") return recordFlow(env, chatId, uid, "+" + text.replace(/^\+/, ""));
+  if (mode === "hutang") return handleDebt(env, chatId, uid, "hutang", text);
+  if (mode === "piutang") return handleDebt(env, chatId, uid, "piutang", text);
+  if (mode.startsWith("edit_amount:")) {
+    const p = parseAmountToken(text);
+    if (!p) return sendMessage(env, chatId, "Nominal tak terbaca. Contoh: 50rb", BACK_MENU);
+    return editField(env, chatId, uid, Number(mode.slice(12)), "amount", p.amount);
+  }
+  if (mode.startsWith("edit_note:")) {
+    return editField(env, chatId, uid, Number(mode.slice(10)), "note", text.trim());
+  }
+  // mode tak dikenal -> perlakukan sebagai catatan biasa
+  return recordFlow(env, chatId, uid, text);
 }
 
 // ---------------------------------------------------------------------------
@@ -566,6 +612,20 @@ function kvKey(uid) {
 function cfgKey(uid) {
   return `cfg:${uid}`;
 }
+// "Mode" = ingatan sesaat: setelah tap tombol +, pesan teks berikutnya diproses
+// sesuai mode ini. Auto-hilang setelah 15 menit.
+function modeKey(uid) {
+  return `mode:${uid}`;
+}
+async function setMode(env, uid, val) {
+  await env.EXPENSES.put(modeKey(uid), val, { expirationTtl: 900 });
+}
+async function getMode(env, uid) {
+  return (await env.EXPENSES.get(modeKey(uid))) || "";
+}
+async function clearMode(env, uid) {
+  await env.EXPENSES.delete(modeKey(uid));
+}
 async function getConfig(env, uid) {
   if (!env.EXPENSES) throw new Error("KV 'EXPENSES' belum di-bind");
   const raw = await env.EXPENSES.get(cfgKey(uid));
@@ -861,6 +921,76 @@ async function deleteLast(env, chatId, uid) {
   return sendMessage(env, chatId, `🗑️ Dihapus: ${last.kind} ${fmtRp(last.amount)} — ${last.note}`);
 }
 
+// ---------------------------------------------------------------------------
+// Edit catatan (pilih dari daftar, lalu ubah/hapus)
+// ---------------------------------------------------------------------------
+
+function entryIcon(e) {
+  return e.kind === "masuk" ? "🟢" : e.kind === "keluar" ? "🔴" : e.kind === "hutang" ? "📕" : "📗";
+}
+
+// Daftar catatan terbaru sebagai tombol untuk diedit.
+async function sendEditList(env, chatId, uid) {
+  const list = await getEntries(env, uid);
+  if (!list.length) return sendMessage(env, chatId, "Belum ada catatan.", BACK_MENU);
+  const recent = [...list].sort((a, b) => b.ts - a.ts).slice(0, 10);
+  const rows = recent.map((e) => {
+    const ket = (e.note || e.party || "").slice(0, 22);
+    return [{ text: `${entryIcon(e)} ${fmtRp(e.amount)} — ${ket}`, callback_data: `edit:${e.ts}` }];
+  });
+  rows.push([BACK_BTN]);
+  return sendMessage(env, chatId, "✏️ Pilih catatan yang mau diedit:", { reply_markup: { inline_keyboard: rows } });
+}
+
+// Pilihan aksi untuk satu catatan.
+async function sendEditOptions(env, chatId, uid, ts) {
+  const list = await getEntries(env, uid);
+  const e = list.find((x) => x.ts === ts);
+  if (!e) return sendMessage(env, chatId, "Catatan tidak ditemukan (mungkin sudah dihapus).", BACK_MENU);
+  const info = `${entryIcon(e)} ${fmtRp(e.amount)} — ${e.note}${e.party ? " / " + e.party : ""}\n🗓️ ${tglPendek(e.ts)}`;
+  const rows = [
+    [
+      { text: "✏️ Nominal", callback_data: `ea:${ts}` },
+      { text: "📝 Keterangan", callback_data: `en:${ts}` },
+    ],
+    [{ text: "🗑️ Hapus", callback_data: `del:${ts}` }],
+    [{ text: "🔙 Daftar", callback_data: "edit" }, BACK_BTN],
+  ];
+  return sendMessage(env, chatId, `Edit:\n${info}`, { reply_markup: { inline_keyboard: rows } });
+}
+
+// Ubah satu field (amount / note) sebuah catatan.
+async function editField(env, chatId, uid, ts, field, value) {
+  const list = await getEntries(env, uid);
+  const idx = list.findIndex((x) => x.ts === ts);
+  if (idx === -1) return sendMessage(env, chatId, "Catatan tidak ditemukan.", BACK_MENU);
+  list[idx][field] = value;
+  // kalau keterangan diubah, kategori otomatis ikut menyesuaikan (kecuali pakai #tag)
+  if (field === "note" && (list[idx].kind === "keluar" || list[idx].kind === "masuk")) {
+    const r = resolveCategory(value);
+    list[idx].note = r.note;
+    list[idx].category = r.category;
+  }
+  await saveEntries(env, uid, list);
+  const e = list[idx];
+  return sendMessage(
+    env,
+    chatId,
+    `✅ Diperbarui:\n${entryIcon(e)} ${fmtRp(e.amount)} — ${e.note}${e.party ? " / " + e.party : ""}`,
+    BACK_MENU,
+  );
+}
+
+// Hapus satu catatan berdasarkan ts.
+async function deleteByTs(env, chatId, uid, ts) {
+  const list = await getEntries(env, uid);
+  const idx = list.findIndex((x) => x.ts === ts);
+  if (idx === -1) return sendMessage(env, chatId, "Catatan tidak ditemukan.", BACK_MENU);
+  const e = list.splice(idx, 1)[0];
+  await saveEntries(env, uid, list);
+  return sendMessage(env, chatId, `🗑️ Dihapus: ${entryIcon(e)} ${fmtRp(e.amount)} — ${e.note}`, BACK_MENU);
+}
+
 // /budget         -> lihat budget & pemakaian
 // /budget 3jt     -> set budget bulanan
 // /budget off     -> matikan
@@ -943,10 +1073,11 @@ function helpText() {
     "/total — total sepanjang waktu",
     "/export — unduh CSV",
     "/hari — tanggal & hari sekarang",
+    "/edit — pilih catatan utk ubah/hapus",
     "/hapus — hapus catatan terakhir",
     "/hapusall — hapus semua (perlu konfirmasi)",
     "",
-    "Tekan /menu untuk tombol cepat.",
+    "Tekan /menu untuk tombol cepat (tap tombol -> langsung ketik angkanya).",
   ].join("\n");
 }
 
@@ -1029,10 +1160,13 @@ const MENU_LAIN = {
   reply_markup: {
     inline_keyboard: [
       [
+        { text: "✏️ Edit catatan", callback_data: "edit" },
         { text: "📄 Export CSV", callback_data: "export" },
-        { text: "📆 Hari ini", callback_data: "hari" },
       ],
-      [{ text: "❓ Bantuan", callback_data: "help" }],
+      [
+        { text: "📆 Hari ini", callback_data: "hari" },
+        { text: "❓ Bantuan", callback_data: "help" },
+      ],
       [BACK_BTN],
     ],
   },
