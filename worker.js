@@ -48,6 +48,12 @@ async function handleTelegram(request, env) {
     return new Response("bad request", { status: 400 });
   }
 
+  // Tombol menu ditekan
+  if (update.callback_query) {
+    await handleCallback(env, update.callback_query);
+    return new Response("ok");
+  }
+
   const msg = update.message || update.edited_message;
   const chatId = msg && msg.chat && msg.chat.id;
   const fromId = msg && msg.from && msg.from.id;
@@ -66,6 +72,41 @@ async function handleTelegram(request, env) {
   return new Response("ok");
 }
 
+// Aksi saat tombol menu (inline keyboard) ditekan.
+async function handleCallback(env, cq) {
+  const chatId = cq.message && cq.message.chat && cq.message.chat.id;
+  const fromId = cq.from && cq.from.id;
+  const data = cq.data || "";
+  await answerCallback(env, cq.id);
+  if (!chatId) return;
+  if (!isAllowed(env, fromId, chatId)) return sendMessage(env, chatId, "Maaf, bot ini privat.");
+
+  const uid = fromId;
+  try {
+    switch (data) {
+      case "menu": return sendMenu(env, chatId);
+      case "laporan": return sendReport(env, chatId, uid);
+      case "utang": return sendDebtReport(env, chatId, uid);
+      case "total": return sendTotal(env, chatId, uid);
+      case "budget": return handleBudget(env, chatId, uid, "");
+      case "lunas": return handleLunas(env, chatId, uid, "");
+      case "export": return exportCsv(env, chatId, uid);
+      case "hari": return sendMessage(env, chatId, `📆 Sekarang: ${namaHariTanggal(Date.now())} (WIB)`);
+      case "help": return sendMessage(env, chatId, helpText());
+      case "add_keluar":
+        return sendMessage(env, chatId, "Ketik pengeluaran, contoh:\n50rb makan siang\n20rb grab");
+      case "add_masuk":
+        return sendMessage(env, chatId, "Ketik pemasukan (pakai +), contoh:\n+5jt gaji");
+      case "add_hutang":
+        return sendMessage(env, chatId, "Ketik, contoh:\n/hutang 100rb budi bensin");
+      case "add_piutang":
+        return sendMessage(env, chatId, "Ketik, contoh:\n/piutang 50rb ani");
+    }
+  } catch (e) {
+    return sendMessage(env, chatId, "Error: " + (e && e.message ? e.message : e));
+  }
+}
+
 async function routeMessage(env, chatId, msg) {
   const uid = msg.from.id;
 
@@ -78,7 +119,13 @@ async function routeMessage(env, chatId, msg) {
   if (!text) return sendMessage(env, chatId, "Kirim catatan (mis. '50rb makan') atau foto struk.");
 
   const lower = text.toLowerCase();
-  if (lower === "/start" || lower === "/help") return sendMessage(env, chatId, helpText());
+  if (lower === "/start") {
+    await sendMessage(env, chatId, helpText());
+    return sendMenu(env, chatId);
+  }
+  if (lower === "/help") return sendMessage(env, chatId, helpText());
+  if (lower.startsWith("/menu")) return sendMenu(env, chatId);
+  if (lower.startsWith("/setup")) return setupMenuButton(env, chatId);
   if (lower.startsWith("/laporan")) return sendReport(env, chatId, uid);
   if (lower.startsWith("/total")) return sendTotal(env, chatId, uid);
   if (lower.startsWith("/export")) return exportCsv(env, chatId, uid);
@@ -684,7 +731,81 @@ function helpText() {
     "/hari — tanggal & hari sekarang",
     "/hapus — hapus catatan terakhir",
     "/hapusall — hapus semua (perlu konfirmasi)",
+    "",
+    "Tekan /menu untuk tombol cepat.",
   ].join("\n");
+}
+
+// Grid tombol menu (inline keyboard) — tinggal tap, tidak perlu ketik.
+const MENU_KEYBOARD = {
+  inline_keyboard: [
+    [
+      { text: "📊 Laporan", callback_data: "laporan" },
+      { text: "📋 Utang", callback_data: "utang" },
+    ],
+    [
+      { text: "💰 Total", callback_data: "total" },
+      { text: "🎯 Budget", callback_data: "budget" },
+    ],
+    [
+      { text: "✅ Lunas", callback_data: "lunas" },
+      { text: "📄 Export CSV", callback_data: "export" },
+    ],
+    [
+      { text: "🔴 + Keluar", callback_data: "add_keluar" },
+      { text: "🟢 + Masuk", callback_data: "add_masuk" },
+    ],
+    [
+      { text: "📕 + Hutang", callback_data: "add_hutang" },
+      { text: "📗 + Piutang", callback_data: "add_piutang" },
+    ],
+    [
+      { text: "📆 Hari ini", callback_data: "hari" },
+      { text: "❓ Bantuan", callback_data: "help" },
+    ],
+  ],
+};
+
+async function sendMenu(env, chatId) {
+  return sendMessage(env, chatId, "📱 Menu — tinggal tap:", { reply_markup: MENU_KEYBOARD });
+}
+
+async function answerCallback(env, callbackId) {
+  try {
+    await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/answerCallbackQuery`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ callback_query_id: callbackId }),
+    });
+  } catch {
+    /* abaikan */
+  }
+}
+
+// Daftarkan daftar perintah -> muncul di tombol "Menu" biru Telegram.
+async function setupMenuButton(env, chatId) {
+  const commands = [
+    { command: "menu", description: "Tombol cepat" },
+    { command: "laporan", description: "Rekap hari & bulan ini" },
+    { command: "utang", description: "Rekap hutang & piutang" },
+    { command: "lunas", description: "Lihat & lunasi hutang/piutang" },
+    { command: "budget", description: "Lihat/atur budget bulanan" },
+    { command: "total", description: "Total sepanjang waktu" },
+    { command: "export", description: "Unduh CSV" },
+    { command: "hari", description: "Tanggal & hari sekarang" },
+    { command: "hapus", description: "Hapus catatan terakhir" },
+    { command: "help", description: "Bantuan" },
+  ];
+  try {
+    await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/setMyCommands`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ commands }),
+    });
+    return sendMessage(env, chatId, "✅ Tombol Menu Telegram sudah diatur. Cek ikon menu di kiri kotak ketik.");
+  } catch (e) {
+    return sendMessage(env, chatId, "Gagal mengatur menu: " + (e && e.message ? e.message : e));
+  }
 }
 
 // Daftar kata kunci -> kategori (untuk deteksi otomatis pengeluaran).
@@ -792,12 +913,13 @@ function isAllowed(env, fromId, chatId) {
   return allow.includes(String(fromId)) || allow.includes(String(chatId));
 }
 
-async function sendMessage(env, chatId, text) {
+async function sendMessage(env, chatId, text, extra) {
   if (!env.BOT_TOKEN) throw new Error("BOT_TOKEN belum diset");
+  const payload = { chat_id: chatId, text, disable_web_page_preview: true, ...(extra || {}) };
   await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/sendMessage`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ chat_id: chatId, text, disable_web_page_preview: true }),
+    body: JSON.stringify(payload),
   });
 }
 
