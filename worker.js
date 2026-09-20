@@ -134,6 +134,7 @@ async function handleCallback(env, cq) {
       return sendMessage(env, chatId, "📝 Ketik keterangan baru:", BACK_MENU);
     }
     if (data.startsWith("del:")) return deleteByTs(env, chatId, uid, Number(data.slice(4)));
+    if (data === "dorestore") return doRestore(env, chatId, uid);
     switch (data) {
       case "menu": return sendMenu(env, chatId);
       // Submenu kategori
@@ -156,6 +157,9 @@ async function handleCallback(env, cq) {
       case "lunas": return handleLunas(env, chatId, uid, "", BACK_MENU);
       case "export": return exportCsv(env, chatId, uid, BACK_MENU);
       case "excel": return exportExcel(env, chatId, uid, BACK_MENU);
+      case "backup": return handleBackup(env, chatId, uid, BACK_MENU);
+      case "restore":
+        return sendMessage(env, chatId, "📥 Kirim file backup (.json) ke sini untuk memulihkan data.", BACK_MENU);
       case "hari":
         return sendMessage(env, chatId, `📆 Sekarang: ${namaHariTanggal(Date.now())} (WIB)`, BACK_MENU);
       case "help": return sendMessage(env, chatId, helpText(), BACK_MENU);
@@ -197,6 +201,9 @@ async function routeMessage(env, chatId, msg) {
     return handleReceiptPhoto(env, chatId, msg, pmode);
   }
 
+  // File dikirim (untuk restore backup .json)
+  if (msg.document) return handleRestoreUpload(env, chatId, msg);
+
   const text = (msg.text || "").trim();
   if (!text) return sendMessage(env, chatId, "Kirim catatan (mis. '50rb makan') atau foto struk.");
 
@@ -214,6 +221,8 @@ async function routeMessage(env, chatId, msg) {
   if (lower.startsWith("/total")) return sendTotal(env, chatId, uid);
   if (lower.startsWith("/excel")) return exportExcel(env, chatId, uid);
   if (lower.startsWith("/export")) return exportCsv(env, chatId, uid);
+  if (lower.startsWith("/backup")) return handleBackup(env, chatId, uid);
+  if (lower.startsWith("/restore")) return sendMessage(env, chatId, "📥 Kirim file backup (.json) ke sini untuk memulihkan data.", BACK_MENU);
   if (lower.startsWith("/hapus")) return handleHapus(env, chatId, uid, text.slice(6).trim());
   if (lower.startsWith("/hari") || lower.startsWith("/tanggal")) return sendMessage(env, chatId, `📆 Sekarang: ${namaHariTanggal(Date.now())} (WIB)`);
   if (lower.startsWith("/budget")) return handleBudget(env, chatId, uid, text.slice(7).trim());
@@ -1091,6 +1100,77 @@ async function exportExcel(env, chatId, uid, markup) {
   if (markup) await sendMessage(env, chatId, "Selesai. 👇", markup);
 }
 
+// ---------------------------------------------------------------------------
+// Backup & Restore (JSON)
+// ---------------------------------------------------------------------------
+
+function rstKey(uid) {
+  return `rst:${uid}`;
+}
+
+// /backup -> kirim file JSON berisi semua data (transaksi + config).
+async function handleBackup(env, chatId, uid, markup) {
+  const [entries, cfg] = await Promise.all([getEntries(env, uid), getConfig(env, uid)]);
+  const payload = {
+    app: "catatan-bot",
+    version: 1,
+    exportedAt: new Date().toISOString(),
+    config: cfg,
+    entries,
+  };
+  const now = wibParts(Date.now());
+  await sendDocument(
+    env,
+    chatId,
+    JSON.stringify(payload),
+    `backup-${now.y}${pad(now.m)}${pad(now.d)}.json`,
+    `🗂️ Backup ${entries.length} catatan. Simpan file ini.\nPulihkan: kirim balik file ini ke bot.`,
+    "application/json",
+  );
+  if (markup) await sendMessage(env, chatId, "Selesai. 👇", markup);
+}
+
+// Terima file .json -> validasi -> minta konfirmasi sebelum menimpa.
+async function handleRestoreUpload(env, chatId, msg) {
+  const uid = msg.from.id;
+  const doc = msg.document;
+  const name = (doc.file_name || "").toLowerCase();
+  const isJson = name.endsWith(".json") || doc.mime_type === "application/json";
+  if (!isJson) {
+    return sendMessage(env, chatId, "Untuk memulihkan, kirim file backup berformat .json.", BACK_MENU);
+  }
+  let data;
+  try {
+    const buf = await getTelegramFile(env, doc.file_id);
+    data = JSON.parse(new TextDecoder().decode(buf));
+  } catch {
+    return sendMessage(env, chatId, "File tidak bisa dibaca / bukan JSON valid.", BACK_MENU);
+  }
+  const entries = Array.isArray(data) ? data : data.entries;
+  if (!Array.isArray(entries)) {
+    return sendMessage(env, chatId, "Format backup tidak dikenali.", BACK_MENU);
+  }
+  // Simpan sementara (15 menit) sampai user konfirmasi.
+  await env.EXPENSES.put(rstKey(uid), JSON.stringify({ entries, config: (data && data.config) || null }), { expirationTtl: 900 });
+  const cur = (await getEntries(env, uid)).length;
+  return sendMessage(
+    env,
+    chatId,
+    `📥 Backup berisi ${entries.length} catatan.\nData saat ini: ${cur} catatan.\n\n⚠️ Memulihkan akan MENIMPA semua data sekarang.`,
+    { reply_markup: { inline_keyboard: [[{ text: "✅ Pulihkan (timpa semua)", callback_data: "dorestore" }], [{ text: "Batal", callback_data: "menu" }]] } },
+  );
+}
+
+async function doRestore(env, chatId, uid) {
+  const raw = await env.EXPENSES.get(rstKey(uid));
+  if (!raw) return sendMessage(env, chatId, "Data restore tidak ada / kadaluarsa. Kirim ulang file backup-nya.", BACK_MENU);
+  const obj = JSON.parse(raw);
+  await saveEntries(env, uid, obj.entries);
+  if (obj.config) await saveConfig(env, uid, obj.config);
+  await env.EXPENSES.delete(rstKey(uid));
+  return sendMessage(env, chatId, `✅ Data dipulihkan: ${obj.entries.length} catatan.`, BACK_MENU);
+}
+
 // Susun workbook: satu sheet per bulan (kronologis), saldo berjalan menyambung.
 function buildExcel(list, cfg) {
   const sorted = [...list].sort((a, b) => a.ts - b.ts);
@@ -1107,34 +1187,35 @@ function buildExcel(list, cfg) {
   }
 
   const HEAD = ["Tanggal", "Waktu", "Jenis", "Masuk", "Keluar", "Saldo", "Kategori", "Keterangan", "Pihak", "Dompet", "Status"];
+  const hrow = () => HEAD.map((h) => ({ v: h, s: 1 }));
   let saldo = 0;
   const rekap = []; // { name, masuk, keluar } per bulan untuk sheet Ringkasan
   const monthSheets = months.map((m) => {
     const rows = [];
-    rows.push(HEAD.map((h) => ({ v: h, s: 1 }))); // header
-    rows.push([bcell(""), bcell(""), bcell("Saldo awal"), null, null, num(saldo, true), null, null, null, null, null]);
+    rows.push(hrow());
+    rows.push([e5(), e5(), bcell("Saldo awal"), e5(), e5(), numS(saldo), e5(), e5(), e5(), e5(), e5()]);
     let tMasuk = 0, tKeluar = 0;
     for (const e of m.entries) {
       const d = new Date(e.ts + WIB_OFFSET_MS);
-      let masukN = null, keluarN = null;
-      if (e.kind === "masuk") { saldo += e.amount; tMasuk += e.amount; masukN = num(e.amount); }
-      else if (e.kind === "keluar") { saldo -= e.amount; tKeluar += e.amount; keluarN = num(e.amount); }
+      let masukN = e5(), keluarN = e5();
+      if (e.kind === "masuk") { saldo += e.amount; tMasuk += e.amount; masukN = numG(e.amount); }
+      else if (e.kind === "keluar") { saldo -= e.amount; tKeluar += e.amount; keluarN = numR(e.amount); }
       else if (e.kind === "mutasi") {
-        if (e.to && !e.from) { saldo += e.amount; masukN = num(e.amount); }
-        else if (e.from && !e.to) { saldo -= e.amount; keluarN = num(e.amount); }
+        if (e.to && !e.from) { saldo += e.amount; masukN = numG(e.amount); }
+        else if (e.from && !e.to) { saldo -= e.amount; keluarN = numR(e.amount); }
       }
       const dompet = e.kind === "mutasi" ? `${e.from || ""}→${e.to || ""}` : e.wallet || "";
       rows.push([
         cell(`${pad(d.getUTCDate())}/${pad(d.getUTCMonth() + 1)}/${d.getUTCFullYear()}`),
         cell(`${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}`),
         cell(e.kind),
-        masukN, keluarN, num(saldo),
+        masukN, keluarN, numS(saldo),
         cell(e.category || ""), cell(e.note || ""), cell(e.party || ""), cell(dompet), cell(e.status || ""),
       ]);
     }
-    rows.push([bcell(""), bcell(""), bcell("TOTAL"), num(tMasuk, true), num(tKeluar, true), num(saldo, true), null, null, null, null, null]);
+    rows.push([tlabel(""), tlabel(""), tlabel("TOTAL"), numT(tMasuk), numT(tKeluar), numT(saldo), tlabel(""), tlabel(""), tlabel(""), tlabel(""), tlabel("")]);
     rekap.push({ name: m.name, masuk: tMasuk, keluar: tKeluar });
-    return { name: m.name.slice(0, 31), rows };
+    return { name: m.name.slice(0, 31), rows, opts: { freeze: true, filterRef: `A1:K${rows.length}` } };
   });
 
   // Sheet "Ringkasan" (paling depan): rekap semua bulan + total + saldo akhir.
@@ -1143,22 +1224,27 @@ function buildExcel(list, cfg) {
   let gM = 0, gK = 0;
   for (const r of rekap) {
     gM += r.masuk; gK += r.keluar;
-    sRows.push([cell(r.name), num(r.masuk), num(r.keluar), num(r.masuk - r.keluar)]);
+    sRows.push([cell(r.name), numG(r.masuk), numR(r.keluar), numS(r.masuk - r.keluar)]);
   }
-  sRows.push([bcell("TOTAL"), num(gM, true), num(gK, true), num(gM - gK, true)]);
+  sRows.push([tlabel("TOTAL"), numT(gM), numT(gK), numT(gM - gK)]);
   sRows.push([]);
-  sRows.push([bcell("Saldo akhir (semua dompet)"), null, null, num(saldo, true)]);
-  const summarySheet = { name: "Ringkasan", rows: sRows };
+  sRows.push([bcell("Saldo akhir (semua dompet)"), e5(), e5(), numT(saldo)]);
+  const summarySheet = { name: "Ringkasan", rows: sRows, opts: { freeze: true } };
 
-  const sheets = [summarySheet, ...monthSheets];
   if (!monthSheets.length) return xlsxPackage([summarySheet]);
-  return xlsxPackage(sheets);
+  return xlsxPackage([summarySheet, ...monthSheets]);
 }
 
-// Helper sel
-function cell(v) { return { v: v == null ? "" : String(v) }; }
-function bcell(v) { return { v: v == null ? "" : String(v), s: 4 }; }
-function num(n, bold) { return { v: Math.round(n), t: "n", s: bold ? 3 : 2 }; }
+// Helper sel (semua bergaris supaya rapi seperti laporan)
+function cell(v) { return { v: v == null ? "" : String(v), s: 5 }; }   // teks
+function bcell(v) { return { v: v == null ? "" : String(v), s: 4 }; }  // teks tebal
+function e5() { return { v: "", s: 5 }; }                              // kosong bergaris
+function num(n) { return { v: Math.round(n), t: "n", s: 2 }; }         // rupiah
+function numG(n) { return { v: Math.round(n), t: "n", s: 6 }; }        // rupiah hijau (masuk)
+function numR(n) { return { v: Math.round(n), t: "n", s: 7 }; }        // rupiah merah (keluar)
+function numS(n) { return { v: Math.round(n), t: "n", s: 8 }; }        // rupiah saldo (biru)
+function numT(n) { return { v: Math.round(n), t: "n", s: 10 }; }       // rupiah total (arsir)
+function tlabel(v) { return { v: v == null ? "" : String(v), s: 9 }; } // sel baris total
 
 // --- XLSX / ZIP internals ---
 const XLSX_CRC = (() => {
@@ -1190,41 +1276,65 @@ function cellXml(ref, c) {
   if (c.t === "n") return `<c r="${ref}" s="${c.s || 0}"><v>${c.v}</v></c>`;
   return `<c r="${ref}" s="${c.s || 0}" t="inlineStr"><is><t xml:space="preserve">${xesc(c.v)}</t></is></c>`;
 }
-function sheetXml(rows) {
+function sheetXml(rows, opts = {}) {
   let x = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
   x += '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">';
-  x += '<cols><col min="1" max="1" width="11"/><col min="2" max="2" width="7"/><col min="3" max="3" width="9"/><col min="4" max="6" width="14"/><col min="7" max="8" width="18"/><col min="9" max="11" width="12"/></cols>';
+  // Sembunyikan gridline bawaan (pakai border sel) + bekukan baris header.
+  x += '<sheetViews><sheetView showGridLines="0" workbookViewId="0">';
+  if (opts.freeze) {
+    x += '<pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/>';
+    x += '<selection pane="bottomLeft" activeCell="A2" sqref="A2"/>';
+  }
+  x += "</sheetView></sheetViews>";
+  x += '<sheetFormatPr defaultRowHeight="15"/>';
+  x += '<cols><col min="1" max="1" width="11"/><col min="2" max="2" width="7"/><col min="3" max="3" width="9"/><col min="4" max="6" width="15"/><col min="7" max="8" width="18"/><col min="9" max="11" width="12"/></cols>';
   x += "<sheetData>";
   rows.forEach((cells, ri) => {
-    x += `<row r="${ri + 1}">`;
+    const ht = ri === 0 ? ' ht="22" customHeight="1"' : "";
+    x += `<row r="${ri + 1}"${ht}>`;
     cells.forEach((c, ci) => { x += cellXml(colLetter(ci) + (ri + 1), c); });
     x += "</row>";
   });
-  x += "</sheetData></worksheet>";
+  x += "</sheetData>";
+  if (opts.filterRef) x += `<autoFilter ref="${opts.filterRef}"/>`;
+  x += "</worksheet>";
   return x;
 }
 const STYLES_XML =
   '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
   '<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">' +
   '<numFmts count="1"><numFmt numFmtId="164" formatCode="&quot;Rp&quot;#,##0;[Red]&quot;Rp&quot;-#,##0"/></numFmts>' +
-  '<fonts count="3">' +
-  '<font><sz val="11"/><name val="Calibri"/></font>' +
-  '<font><b/><sz val="11"/><name val="Calibri"/></font>' +
-  '<font><b/><sz val="11"/><color rgb="FFFFFFFF"/><name val="Calibri"/></font>' +
+  '<fonts count="6">' +
+  '<font><sz val="11"/><name val="Calibri"/></font>' +                                             // 0 default
+  '<font><b/><sz val="11"/><name val="Calibri"/></font>' +                                          // 1 bold
+  '<font><b/><sz val="11"/><color rgb="FFFFFFFF"/><name val="Calibri"/></font>' +                   // 2 bold putih
+  '<font><b/><sz val="11"/><color rgb="FF137333"/><name val="Calibri"/></font>' +                   // 3 hijau
+  '<font><b/><sz val="11"/><color rgb="FFC5221F"/><name val="Calibri"/></font>' +                   // 4 merah
+  '<font><b/><sz val="11"/><color rgb="FF1F3A5F"/><name val="Calibri"/></font>' +                   // 5 biru
   "</fonts>" +
-  '<fills count="3">' +
+  '<fills count="4">' +
   '<fill><patternFill patternType="none"/></fill>' +
   '<fill><patternFill patternType="gray125"/></fill>' +
-  '<fill><patternFill patternType="solid"><fgColor rgb="FF1F3A5F"/><bgColor indexed="64"/></patternFill></fill>' +
+  '<fill><patternFill patternType="solid"><fgColor rgb="FF1F3A5F"/><bgColor indexed="64"/></patternFill></fill>' + // 2 header
+  '<fill><patternFill patternType="solid"><fgColor rgb="FFEFF2F6"/><bgColor indexed="64"/></patternFill></fill>' + // 3 total
   "</fills>" +
-  '<borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>' +
+  '<borders count="2">' +
+  '<border><left/><right/><top/><bottom/><diagonal/></border>' +
+  '<border><left style="thin"><color rgb="FFD9DDE3"/></left><right style="thin"><color rgb="FFD9DDE3"/></right><top style="thin"><color rgb="FFD9DDE3"/></top><bottom style="thin"><color rgb="FFD9DDE3"/></bottom><diagonal/></border>' +
+  "</borders>" +
   '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>' +
-  '<cellXfs count="5">' +
-  '<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>' +
-  '<xf numFmtId="0" fontId="2" fillId="2" borderId="0" xfId="0" applyFont="1" applyFill="1"/>' +
-  '<xf numFmtId="164" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>' +
-  '<xf numFmtId="164" fontId="1" fillId="0" borderId="0" xfId="0" applyNumberFormat="1" applyFont="1"/>' +
-  '<xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/>' +
+  '<cellXfs count="11">' +
+  '<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>' +                                                                                             // 0 default
+  '<xf numFmtId="0" fontId="2" fillId="2" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf>' + // 1 header
+  '<xf numFmtId="164" fontId="0" fillId="0" borderId="1" xfId="0" applyNumberFormat="1" applyBorder="1"/>' +                                                     // 2 rupiah
+  '<xf numFmtId="164" fontId="1" fillId="0" borderId="1" xfId="0" applyNumberFormat="1" applyFont="1" applyBorder="1"/>' +                                       // 3 rupiah bold
+  '<xf numFmtId="0" fontId="1" fillId="0" borderId="1" xfId="0" applyFont="1" applyBorder="1"/>' +                                                               // 4 teks bold
+  '<xf numFmtId="0" fontId="0" fillId="0" borderId="1" xfId="0" applyBorder="1"/>' +                                                                             // 5 teks
+  '<xf numFmtId="164" fontId="3" fillId="0" borderId="1" xfId="0" applyNumberFormat="1" applyFont="1" applyBorder="1"/>' +                                       // 6 rupiah hijau
+  '<xf numFmtId="164" fontId="4" fillId="0" borderId="1" xfId="0" applyNumberFormat="1" applyFont="1" applyBorder="1"/>' +                                       // 7 rupiah merah
+  '<xf numFmtId="164" fontId="5" fillId="0" borderId="1" xfId="0" applyNumberFormat="1" applyFont="1" applyBorder="1"/>' +                                       // 8 rupiah saldo (biru)
+  '<xf numFmtId="0" fontId="1" fillId="3" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1"/>' +                                                 // 9 total label
+  '<xf numFmtId="164" fontId="1" fillId="3" borderId="1" xfId="0" applyNumberFormat="1" applyFont="1" applyFill="1" applyBorder="1"/>' +                         // 10 total rupiah
   "</cellXfs>" +
   '<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>' +
   "</styleSheet>";
@@ -1281,7 +1391,7 @@ function xlsxPackage(sheets) {
   // styles + sheets
   files.push({ name: "xl/styles.xml", data: enc(STYLES_XML) });
   sheets.forEach((s, i) => {
-    files.push({ name: `xl/worksheets/sheet${i + 1}.xml`, data: enc(sheetXml(s.rows)) });
+    files.push({ name: `xl/worksheets/sheet${i + 1}.xml`, data: enc(sheetXml(s.rows, s.opts || {})) });
   });
 
   return zipStore(files);
@@ -1656,6 +1766,10 @@ function helpText() {
     "/hapus   — hapus catatan terakhir",
     "/hapusall — hapus semua (perlu konfirmasi)",
     "",
+    "━ BACKUP ━",
+    "/backup  — unduh file backup .json",
+    "/restore — kirim file .json untuk memulihkan",
+    "",
     "ℹ️ Rekap bulan lalu dikirim otomatis tiap awal bulan.",
   ].join("\n");
 }
@@ -1760,6 +1874,10 @@ const MENU_LAIN = {
       [
         { text: "✏️ Edit catatan", callback_data: "edit" },
         { text: "📄 Export CSV", callback_data: "export" },
+      ],
+      [
+        { text: "🗂️ Backup", callback_data: "backup" },
+        { text: "📥 Restore", callback_data: "restore" },
       ],
       [
         { text: "📆 Hari ini", callback_data: "hari" },
