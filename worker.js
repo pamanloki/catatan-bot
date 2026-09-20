@@ -136,10 +136,11 @@ async function handleReceiptPhoto(env, chatId, msg) {
 
   const result = await readReceipt(env, bytes);
   if (!result || !result.amount) {
+    const why = result && result.debug ? `\n\n(debug: ${result.debug})` : "";
     return sendMessage(
       env,
       chatId,
-      "Maaf, total di struk tidak terbaca. Coba foto lebih jelas & lurus, atau ketik manual (mis. '50rb belanja').",
+      "Maaf, total di struk tidak terbaca. Coba foto lebih jelas & lurus, atau ketik manual (mis. '50rb belanja')." + why,
     );
   }
 
@@ -160,8 +161,11 @@ async function readReceipt(env, arrayBuffer) {
     const g = await readReceiptGemini(env, arrayBuffer);
     if (g && g.amount) return g;
     // kalau Gemini gagal & Workers AI tersedia, coba cadangan
-    if (env.AI) return readReceiptWorkersAI(env, arrayBuffer);
-    return g;
+    if (env.AI) {
+      const w = await readReceiptWorkersAI(env, arrayBuffer);
+      if (w && w.amount) return w;
+    }
+    return g; // bawa info debug dari Gemini
   }
   return readReceiptWorkersAI(env, arrayBuffer);
 }
@@ -180,20 +184,37 @@ async function readReceiptGemini(env, arrayBuffer) {
     ],
     generationConfig: { temperature: 0, maxOutputTokens: 256 },
   };
-  let text = "";
+  let status = 0;
+  let bodyText = "";
   try {
     const r = await fetch(url, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
     });
-    const j = await r.json();
-    const parts = j && j.candidates && j.candidates[0] && j.candidates[0].content && j.candidates[0].content.parts;
-    text = (parts || []).map((p) => p.text || "").join("");
-  } catch {
-    return null;
+    status = r.status;
+    bodyText = await r.text();
+  } catch (e) {
+    return { amount: 0, toko: "", debug: `Gemini gagal konek: ${e && e.message ? e.message : e}` };
   }
-  return parseReceiptJson(text);
+
+  let j;
+  try {
+    j = JSON.parse(bodyText);
+  } catch {
+    return { amount: 0, toko: "", debug: `Gemini HTTP ${status}: ${bodyText.slice(0, 160)}` };
+  }
+
+  if (status !== 200 || j.error) {
+    const msg = (j.error && j.error.message) || `HTTP ${status}`;
+    return { amount: 0, toko: "", debug: `Gemini: ${msg}` };
+  }
+
+  const parts = j.candidates && j.candidates[0] && j.candidates[0].content && j.candidates[0].content.parts;
+  const text = (parts || []).map((p) => p.text || "").join("");
+  const parsed = parseReceiptJson(text);
+  if (parsed && parsed.amount) return parsed;
+  return { amount: 0, toko: "", debug: `Gemini balas tapi total tak terbaca: ${text.slice(0, 120)}` };
 }
 
 async function readReceiptWorkersAI(env, arrayBuffer) {
