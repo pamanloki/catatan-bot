@@ -95,10 +95,12 @@ async function routeMessage(env, chatId, msg) {
       "Format belum kebaca.\nPengeluaran: '50rb makan'\nPemasukan: '+5jt gaji'",
     );
   }
-  await addEntry(env, uid, { kind: flow.kind, amount: flow.amount, note: flow.note, src: "teks" });
+  const { category, note } = resolveCategory(flow.note);
+  await addEntry(env, uid, { kind: flow.kind, amount: flow.amount, note, category, src: "teks" });
   const label = flow.kind === "masuk" ? "Pemasukan" : "Pengeluaran";
   const icon = flow.kind === "masuk" ? "🟢" : "🔴";
-  return sendMessage(env, chatId, `${icon} ${label} tercatat: ${fmtRp(flow.amount)} — ${flow.note}`);
+  const catTag = flow.kind === "keluar" ? ` [${category}]` : "";
+  return sendMessage(env, chatId, `${icon} ${label} tercatat: ${fmtRp(flow.amount)} — ${note}${catTag}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -124,7 +126,8 @@ async function handleReceiptPhoto(env, chatId, msg) {
   }
 
   const note = result.toko || (msg.caption || "").trim() || "struk";
-  await addEntry(env, msg.from.id, { kind: "keluar", amount: result.amount, note, src: "foto" });
+  const category = categorize(note);
+  await addEntry(env, msg.from.id, { kind: "keluar", amount: result.amount, note, category, src: "foto" });
   return sendMessage(env, chatId, `🔴 Pengeluaran (struk): ${fmtRp(result.amount)} — ${note}`);
 }
 
@@ -267,6 +270,7 @@ async function addEntry(env, uid, entry) {
     kind: entry.kind, // keluar | masuk | hutang | piutang
     amount: entry.amount,
     note: entry.note,
+    category: entry.category || "",
     party: entry.party || "",
     status: entry.status || "",
     src: entry.src || "teks",
@@ -289,6 +293,7 @@ async function sendReport(env, chatId, uid) {
   let masukBulan = 0, keluarBulan = 0, masukHari = 0, keluarHari = 0;
   let hutangOpen = 0, piutangOpen = 0;
   const hariIni = [];
+  const perKategori = {}; // pengeluaran bulan ini per kategori
 
   for (const e of list) {
     if (e.kind === "hutang" && e.status === "belum") hutangOpen += e.amount;
@@ -297,7 +302,13 @@ async function sendReport(env, chatId, uid) {
 
     const p = wibParts(e.ts);
     if (p.y * 100 + p.m === monthKey) {
-      if (e.kind === "masuk") masukBulan += e.amount; else keluarBulan += e.amount;
+      if (e.kind === "masuk") {
+        masukBulan += e.amount;
+      } else {
+        keluarBulan += e.amount;
+        const cat = e.category || "Lainnya";
+        perKategori[cat] = (perKategori[cat] || 0) + e.amount;
+      }
     }
     if (p.y * 10000 + p.m * 100 + p.d === todayKey) {
       if (e.kind === "masuk") masukHari += e.amount; else keluarHari += e.amount;
@@ -314,6 +325,14 @@ async function sendReport(env, chatId, uid) {
   lines.push(`🟢 Masuk : ${fmtRp(masukBulan)}`);
   lines.push(`🔴 Keluar: ${fmtRp(keluarBulan)}`);
   lines.push(`💰 Saldo : ${fmtRp(masukBulan - keluarBulan)}`);
+  const kategoriUrut = Object.entries(perKategori).sort((a, b) => b[1] - a[1]);
+  if (kategoriUrut.length) {
+    lines.push("", "— Pengeluaran per kategori (bulan ini) —");
+    for (const [cat, amt] of kategoriUrut) {
+      const persen = keluarBulan ? Math.round((amt / keluarBulan) * 100) : 0;
+      lines.push(`• ${cat}: ${fmtRp(amt)} (${persen}%)`);
+    }
+  }
   if (hutangOpen || piutangOpen) {
     lines.push("", "— Belum lunas —");
     if (hutangOpen) lines.push(`📕 Hutang : ${fmtRp(hutangOpen)}`);
@@ -349,14 +368,14 @@ async function exportCsv(env, chatId, uid) {
   const list = await getEntries(env, uid);
   if (!list.length) return sendMessage(env, chatId, "Belum ada catatan untuk diexport.");
 
-  const header = ["Tanggal", "Waktu", "Jenis", "Jumlah", "Keterangan", "Pihak", "Status", "Sumber"];
+  const header = ["Tanggal", "Waktu", "Jenis", "Jumlah", "Kategori", "Keterangan", "Pihak", "Status", "Sumber"];
   const rows = [header.map(csvCell).join(",")];
   for (const e of [...list].sort((a, b) => a.ts - b.ts)) {
     const d = new Date(e.ts + WIB_OFFSET_MS);
     const tgl = `${pad(d.getUTCDate())}/${pad(d.getUTCMonth() + 1)}/${d.getUTCFullYear()}`;
     const jam = `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}`;
     rows.push(
-      [tgl, jam, e.kind, e.amount, e.note, e.party || "", e.status || "", e.src || ""]
+      [tgl, jam, e.kind, e.amount, e.category || "", e.note, e.party || "", e.status || "", e.src || ""]
         .map(csvCell)
         .join(","),
     );
@@ -392,6 +411,7 @@ function helpText() {
     "Pengeluaran: 50rb makan siang  (atau -50rb makan)",
     "Pemasukan  : +5jt gaji  (pakai tanda +)",
     "Foto struk : kirim fotonya (jadi pengeluaran)",
+    "Kategori   : otomatis dari kata kunci; paksa dgn #tag (mis. 100rb #arisan)",
     "",
     "Hutang/Piutang:",
     "/hutang 100rb budi beli bensin  (kamu pinjam)",
@@ -404,6 +424,42 @@ function helpText() {
     "/export — unduh CSV",
     "/hapus — hapus catatan terakhir",
   ].join("\n");
+}
+
+// Daftar kata kunci -> kategori (untuk deteksi otomatis pengeluaran).
+const CATEGORY_RULES = [
+  ["Makan", ["makan", "minum", "warung", "warteg", "kopi", "cafe", "kafe", "resto", "jajan", "sarapan", "nasi", "ayam", "bakso", "mie", "gofood", "grabfood", "snack", "cemilan", "roti", "kue"]],
+  ["Transport", ["grab", "gojek", "gocar", "gobike", "ojek", "ojol", "bensin", "parkir", "tol", "bus", "kereta", "krl", "mrt", "angkot", "transport", "spbu", "pertalite", "pertamax", "solar", "taksi", "taxi"]],
+  ["Belanja", ["belanja", "indomaret", "alfamart", "supermarket", "market", "shopee", "tokopedia", "lazada", "baju", "sabun", "sampo", "skincare", "kosmetik"]],
+  ["Tagihan", ["listrik", "pln", "pulsa", "token", "wifi", "internet", "air", "pdam", "bpjs", "tagihan", "kuota", "paket data", "indihome"]],
+  ["Kesehatan", ["obat", "dokter", "apotek", "apotik", "rumah sakit", "klinik", "vitamin", "periksa", "bpjs kesehatan"]],
+  ["Hiburan", ["nonton", "netflix", "spotify", "game", "film", "bioskop", "wisata", "liburan", "main"]],
+  ["Rumah", ["sewa", "kos", "kontrakan", "galon", "gas", "elpiji", "perabot", "listrik rumah"]],
+  ["Pendidikan", ["buku", "kursus", "spp", "sekolah", "kuliah", "les", "seminar", "pelatihan"]],
+];
+
+// Tebak kategori dari keterangan; default "Lainnya".
+function categorize(note) {
+  const s = (note || "").toLowerCase();
+  for (const [cat, kws] of CATEGORY_RULES) {
+    if (kws.some((k) => s.includes(k))) return cat;
+  }
+  return "Lainnya";
+}
+
+// Ambil kategori dari '#tag' bila ada (dan buang dari keterangan); kalau tidak,
+// tebak otomatis dari isi keterangan.
+function resolveCategory(note) {
+  const m = (note || "").match(/#(\S+)/);
+  if (m) {
+    const cleaned = note.replace(m[0], "").replace(/\s+/g, " ").trim() || "(tanpa keterangan)";
+    return { category: capitalize(m[1]), note: cleaned };
+  }
+  return { category: categorize(note), note };
+}
+
+function capitalize(s) {
+  return s ? s[0].toUpperCase() + s.slice(1) : s;
 }
 
 // Pengeluaran = default (tanpa tanda) atau diawali '-'; pemasukan diawali '+'.
