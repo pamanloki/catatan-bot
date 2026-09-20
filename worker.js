@@ -141,7 +141,10 @@ async function handleCallback(env, cq) {
       case "cat_laporan": return sendMessage(env, chatId, "📊 Laporan & data:", MENU_LAPORAN);
       case "cat_utang": return sendMessage(env, chatId, "📋 Hutang & Piutang:", MENU_UTANG);
       case "cat_budget": return sendMessage(env, chatId, "🎯 Budget:", MENU_BUDGET);
+      case "cat_dompet": return sendMessage(env, chatId, "👛 Dompet:", MENU_DOMPET);
       case "cat_lain": return sendMessage(env, chatId, "🧰 Lainnya:", MENU_LAIN);
+      case "saldo": return sendSaldo(env, chatId, uid, BACK_MENU);
+      case "dompet": return handleDompet(env, chatId, uid, "");
       // Aksi (hasil selalu ada tombol balik)
       case "laporan": return sendReport(env, chatId, uid, BACK_MENU);
       case "grafik": return sendChart(env, chatId, uid, BACK_MENU);
@@ -164,7 +167,10 @@ async function handleCallback(env, cq) {
         return sendMessage(env, chatId, "🟢 Ketik pemasukan (langsung):\ncontoh: 5jt gaji", BACK_MENU);
       case "add_mutasi":
         await setMode(env, uid, "mutasi");
-        return sendMessage(env, chatId, "💵 Ketik jumlah tarik tunai:\ncontoh: 500rb\n(tidak dihitung sebagai pengeluaran)", BACK_MENU);
+        return sendMessage(env, chatId, "💵 Ketik jumlah tarik tunai:\ncontoh: 500rb\n(pindah Bank → Cash, bukan pengeluaran)", BACK_MENU);
+      case "add_pindah":
+        await setMode(env, uid, "pindah");
+        return sendMessage(env, chatId, "🔁 Ketik: jumlah dari ke\ncontoh: 200rb bank gopay", BACK_MENU);
       case "add_hutang":
         await setMode(env, uid, "hutang");
         return sendMessage(env, chatId, "📕 Ketik: nominal nama [ket] [tgl]\ncontoh: 100rb budi bensin tgl 15-3-2025", BACK_MENU);
@@ -208,6 +214,9 @@ async function routeMessage(env, chatId, msg) {
   if (lower.startsWith("/budget")) return handleBudget(env, chatId, uid, text.slice(7).trim());
   if (lower.startsWith("/lunas")) return handleLunas(env, chatId, uid, text.slice(6).trim());
   if (lower.startsWith("/utang") || lower.startsWith("/rekaputang")) return sendDebtReport(env, chatId, uid);
+  if (lower.startsWith("/saldo")) return sendSaldo(env, chatId, uid);
+  if (lower.startsWith("/dompet")) return handleDompet(env, chatId, uid, text.slice(7).trim());
+  if (lower.startsWith("/pindah") || lower.startsWith("/transfer")) return recordFlow(env, chatId, uid, text.slice(1));
   if (lower.startsWith("/edit")) return sendEditList(env, chatId, uid);
   if (lower.startsWith("/hutang")) return handleDebt(env, chatId, uid, "hutang", text.slice(7).trim());
   if (lower.startsWith("/piutang")) return handleDebt(env, chatId, uid, "piutang", text.slice(8).trim());
@@ -233,34 +242,50 @@ async function recordFlow(env, chatId, uid, text) {
       "Format belum kebaca.\nPengeluaran: '50rb makan'\nPemasukan: '+5jt gaji'",
     );
   }
+  const cfg = await getConfig(env, uid);
   const tgl = parseTanggal(flow.note);
+  const tglTeks = tgl.ts ? `\n🗓️ ${namaHariTanggal(tgl.ts)}` : "";
 
-  // Tarik tunai: dicatat tapi tidak dihitung sebagai pengeluaran.
+  // Mutasi: tarik tunai / pindah antar dompet. Tidak dihitung pengeluaran.
   if (flow.kind === "mutasi") {
-    const note = tgl.rest || "tarik tunai";
-    await addEntry(env, uid, { kind: "mutasi", amount: flow.amount, note, ts: tgl.ts || 0, src: "teks" });
-    const tglT = tgl.ts ? `\n🗓️ ${namaHariTanggal(tgl.ts)}` : "";
+    let from, to, note;
+    if (flow.move === "pindah") {
+      const parts = tgl.rest.split(/\s+/).filter(Boolean);
+      from = resolveWallet(parts[0], cfg);
+      to = resolveWallet(parts[1], cfg);
+      if (!from || !to) {
+        return sendMessage(env, chatId, `Format: pindah 200rb <dari> <ke>\nDompet: ${cfg.wallets.join(", ")}`, BACK_MENU);
+      }
+      note = `pindah ${from}→${to}`;
+    } else {
+      from = bankWallet(cfg);
+      to = cashWallet(cfg);
+      note = tgl.rest || "tarik tunai";
+    }
+    await addEntry(env, uid, { kind: "mutasi", amount: flow.amount, note, from, to, ts: tgl.ts || 0, src: "teks" });
     return sendMessage(
       env,
       chatId,
-      `💵 Tarik tunai dicatat: ${fmtRp(flow.amount)} — ${note}${tglT}\n(tidak dihitung sebagai pengeluaran)`,
+      `💵 ${fmtRp(flow.amount)} — ${from} → ${to}${tglTeks}\n(pindah dompet, bukan pengeluaran)`,
       BACK_MENU,
     );
   }
 
-  const { category, note } = resolveCategory(tgl.rest);
-  await addEntry(env, uid, { kind: flow.kind, amount: flow.amount, note, category, ts: tgl.ts || 0, src: "teks" });
+  // Ambil tag @dompet (default = dompet utama).
+  const w = extractWallet(tgl.rest, cfg);
+  const wallet = w.wallet || cfg.defaultWallet;
+  const { category, note } = resolveCategory(w.rest);
+  await addEntry(env, uid, { kind: flow.kind, amount: flow.amount, note, category, wallet, ts: tgl.ts || 0, src: "teks" });
   const label = flow.kind === "masuk" ? "Pemasukan" : "Pengeluaran";
   const icon = flow.kind === "masuk" ? "🟢" : "🔴";
-  const tglTeks = tgl.ts ? `\n🗓️ ${namaHariTanggal(tgl.ts)}` : "";
   if (flow.kind === "masuk") {
-    return sendMessage(env, chatId, `${icon} ${label} tercatat: ${fmtRp(flow.amount)} — ${note}${tglTeks}`, BACK_MENU);
+    return sendMessage(env, chatId, `${icon} ${label} tercatat: ${fmtRp(flow.amount)} — ${note} (${wallet})${tglTeks}`, BACK_MENU);
   }
   const extra = await spendingSummaryLines(env, uid);
   return sendMessage(
     env,
     chatId,
-    [`${icon} ${label} tercatat: ${fmtRp(flow.amount)} — ${note} [${category}]${tglTeks}`, ...extra].join("\n"),
+    [`${icon} ${label} tercatat: ${fmtRp(flow.amount)} — ${note} [${category}] (${wallet})${tglTeks}`, ...extra].join("\n"),
     BACK_MENU,
   );
 }
@@ -270,6 +295,7 @@ async function handleModeInput(env, chatId, uid, mode, text) {
   if (mode === "keluar") return recordFlow(env, chatId, uid, text);
   if (mode === "masuk") return recordFlow(env, chatId, uid, "+" + text.replace(/^\+/, ""));
   if (mode === "mutasi") return recordFlow(env, chatId, uid, "tarik " + text);
+  if (mode === "pindah") return recordFlow(env, chatId, uid, "pindah " + text);
   if (mode === "hutang") return handleDebt(env, chatId, uid, "hutang", text);
   if (mode === "piutang") return handleDebt(env, chatId, uid, "piutang", text);
   if (mode.startsWith("edit_amount:")) {
@@ -336,12 +362,15 @@ async function handleReceiptPhoto(env, chatId, msg, mode) {
   }
 
   if (cls.kind === "mutasi") {
+    const cfg = await getConfig(env, uid);
+    const from = bankWallet(cfg);
+    const to = cashWallet(cfg);
     const note = cls.note || "tarik tunai";
-    await addEntry(env, uid, { kind: "mutasi", amount: result.amount, note, src: "foto" });
+    await addEntry(env, uid, { kind: "mutasi", amount: result.amount, note, from, to, src: "foto" });
     return sendMessage(
       env,
       chatId,
-      `💵 Tarik tunai (struk): ${fmtRp(result.amount)} — ${note}\n(tidak dihitung sebagai pengeluaran)`,
+      `💵 Tarik tunai (struk): ${fmtRp(result.amount)} — ${from} → ${to}\n(pindah dompet, bukan pengeluaran)`,
       BACK_MENU,
     );
   }
@@ -711,7 +740,53 @@ async function clearMode(env, uid) {
 async function getConfig(env, uid) {
   if (!env.EXPENSES) throw new Error("KV 'EXPENSES' belum di-bind");
   const raw = await env.EXPENSES.get(cfgKey(uid));
-  return raw ? JSON.parse(raw) : { budget: 0 };
+  const c = raw ? JSON.parse(raw) : {};
+  return {
+    budget: c.budget || 0,
+    wallets: Array.isArray(c.wallets) && c.wallets.length ? c.wallets : ["Cash", "Bank"],
+    defaultWallet: c.defaultWallet || "Cash",
+  };
+}
+
+// Cari nama dompet yang cocok (case-insensitive).
+function resolveWallet(name, cfg) {
+  if (!name) return "";
+  return cfg.wallets.find((w) => w.toLowerCase() === name.toLowerCase()) || "";
+}
+function cashWallet(cfg) {
+  return cfg.wallets.find((w) => /cash|tunai/i.test(w)) || cfg.defaultWallet;
+}
+function bankWallet(cfg) {
+  return cfg.wallets.find((w) => /bank/i.test(w)) || cfg.wallets.find((w) => w !== cashWallet(cfg)) || cfg.defaultWallet;
+}
+
+// Ambil tag "@dompet" dari teks; kembalikan { wallet, rest }.
+function extractWallet(text, cfg) {
+  const m = text.match(/@(\S+)/);
+  if (!m) return { wallet: "", rest: text };
+  const w = resolveWallet(m[1], cfg);
+  if (!w) return { wallet: "", rest: text }; // tag tak dikenal -> biarkan
+  const rest = (text.slice(0, m.index) + text.slice(m.index + m[0].length)).replace(/\s+/g, " ").trim();
+  return { wallet: w, rest };
+}
+
+// Hitung saldo tiap dompet dari seluruh catatan.
+function walletBalances(list, cfg) {
+  const bal = {};
+  for (const w of cfg.wallets) bal[w] = 0;
+  const add = (w, n) => {
+    if (!w) return;
+    bal[w] = (bal[w] || 0) + n;
+  };
+  for (const e of list) {
+    if (e.kind === "masuk") add(e.wallet || cfg.defaultWallet, e.amount);
+    else if (e.kind === "keluar") add(e.wallet || cfg.defaultWallet, -e.amount);
+    else if (e.kind === "mutasi") {
+      add(e.from, -e.amount);
+      add(e.to, e.amount);
+    }
+  }
+  return bal;
 }
 async function saveConfig(env, uid, cfg) {
   await env.EXPENSES.put(cfgKey(uid), JSON.stringify(cfg));
@@ -728,12 +803,15 @@ async function addEntry(env, uid, entry) {
   const list = await getEntries(env, uid);
   list.push({
     ts: entry.ts || Date.now(), // bisa di-backdate (mis. hutang tahun lalu)
-    kind: entry.kind, // keluar | masuk | hutang | piutang
+    kind: entry.kind, // keluar | masuk | hutang | piutang | mutasi
     amount: entry.amount,
     note: entry.note,
     category: entry.category || "",
     party: entry.party || "",
     status: entry.status || "",
+    wallet: entry.wallet || "", // dompet (masuk/keluar)
+    from: entry.from || "", // dompet asal (mutasi)
+    to: entry.to || "", // dompet tujuan (mutasi)
     src: entry.src || "teks",
   });
   await saveEntries(env, uid, list);
@@ -943,14 +1021,15 @@ async function exportCsv(env, chatId, uid, markup) {
   const list = await getEntries(env, uid);
   if (!list.length) return sendMessage(env, chatId, "Belum ada catatan untuk diexport.", markup);
 
-  const header = ["Tanggal", "Waktu", "Jenis", "Jumlah", "Kategori", "Keterangan", "Pihak", "Status", "Sumber"];
+  const header = ["Tanggal", "Waktu", "Jenis", "Jumlah", "Kategori", "Keterangan", "Pihak", "Dompet", "Status", "Sumber"];
   const rows = [header.map(csvCell).join(",")];
   for (const e of [...list].sort((a, b) => a.ts - b.ts)) {
     const d = new Date(e.ts + WIB_OFFSET_MS);
     const tgl = `${pad(d.getUTCDate())}/${pad(d.getUTCMonth() + 1)}/${d.getUTCFullYear()}`;
     const jam = `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}`;
+    const dompet = e.kind === "mutasi" ? `${e.from || ""}→${e.to || ""}` : e.wallet || "";
     rows.push(
-      [tgl, jam, e.kind, e.amount, e.category || "", e.note, e.party || "", e.status || "", e.src || ""]
+      [tgl, jam, e.kind, e.amount, e.category || "", e.note, e.party || "", dompet, e.status || "", e.src || ""]
         .map(csvCell)
         .join(","),
     );
@@ -1078,6 +1157,85 @@ async function deleteByTs(env, chatId, uid, ts) {
   return sendMessage(env, chatId, `🗑️ Dihapus: ${entryIcon(e)} ${fmtRp(e.amount)} — ${e.note}`, BACK_MENU);
 }
 
+// ---------------------------------------------------------------------------
+// Dompet (wallet) & saldo
+// ---------------------------------------------------------------------------
+
+async function sendSaldo(env, chatId, uid, markup) {
+  const [list, cfg] = await Promise.all([getEntries(env, uid), getConfig(env, uid)]);
+  const bal = walletBalances(list, cfg);
+  const lines = ["👛 Saldo per dompet:", ""];
+  let total = 0;
+  for (const w of cfg.wallets) {
+    total += bal[w] || 0;
+    lines.push(`• ${w}: ${fmtRp(bal[w] || 0)}`);
+  }
+  // dompet lain yang muncul dari data lama tapi tak terdaftar
+  for (const w of Object.keys(bal)) {
+    if (!cfg.wallets.includes(w)) {
+      total += bal[w];
+      lines.push(`• ${w}: ${fmtRp(bal[w])} (tak terdaftar)`);
+    }
+  }
+  lines.push("", `💰 Total: ${fmtRp(total)}`);
+  lines.push("", "Catat ke dompet tertentu: tambah @nama, mis '50rb makan @cash'");
+  return sendMessage(env, chatId, lines.join("\n"), markup || BACK_MENU);
+}
+
+// /dompet                 -> daftar dompet + saldo
+// /dompet tambah GoPay    -> tambah dompet
+// /dompet hapus GoPay     -> hapus dompet
+// /dompet utama Bank      -> set dompet default
+async function handleDompet(env, chatId, uid, arg) {
+  const cfg = await getConfig(env, uid);
+  const parts = arg.split(/\s+/).filter(Boolean);
+  const cmd = (parts.shift() || "").toLowerCase();
+  const name = parts.join(" ").trim();
+
+  if (cmd === "tambah" || cmd === "add") {
+    if (!name) return sendMessage(env, chatId, "Nama dompet? Contoh: /dompet tambah GoPay", BACK_MENU);
+    if (cfg.wallets.some((w) => w.toLowerCase() === name.toLowerCase())) {
+      return sendMessage(env, chatId, `Dompet "${name}" sudah ada.`, BACK_MENU);
+    }
+    cfg.wallets.push(name);
+    await saveConfig(env, uid, cfg);
+    return sendMessage(env, chatId, `✅ Dompet ditambah: ${name}\nSekarang: ${cfg.wallets.join(", ")}`, BACK_MENU);
+  }
+  if (cmd === "hapus" || cmd === "del") {
+    const w = resolveWallet(name, cfg);
+    if (!w) return sendMessage(env, chatId, `Dompet "${name}" tidak ada.`, BACK_MENU);
+    cfg.wallets = cfg.wallets.filter((x) => x !== w);
+    if (cfg.defaultWallet === w) cfg.defaultWallet = cfg.wallets[0] || "Cash";
+    await saveConfig(env, uid, cfg);
+    return sendMessage(env, chatId, `🗑️ Dompet dihapus: ${w}\n(catatan lama tetap tersimpan)`, BACK_MENU);
+  }
+  if (cmd === "utama" || cmd === "default") {
+    const w = resolveWallet(name, cfg);
+    if (!w) return sendMessage(env, chatId, `Dompet "${name}" tidak ada.`, BACK_MENU);
+    cfg.defaultWallet = w;
+    await saveConfig(env, uid, cfg);
+    return sendMessage(env, chatId, `✅ Dompet utama: ${w}`, BACK_MENU);
+  }
+
+  // tampilkan info + saldo
+  const bal = walletBalances(await getEntries(env, uid), cfg);
+  const lines = ["👛 Dompet:", ""];
+  for (const w of cfg.wallets) {
+    const utama = w === cfg.defaultWallet ? " ⭐" : "";
+    lines.push(`• ${w}: ${fmtRp(bal[w] || 0)}${utama}`);
+  }
+  lines.push(
+    "",
+    "Kelola:",
+    "/dompet tambah GoPay",
+    "/dompet hapus GoPay",
+    "/dompet utama Bank",
+    "",
+    "Pakai: '50rb makan @gopay' · pindah: 'pindah 200rb bank cash'",
+  );
+  return sendMessage(env, chatId, lines.join("\n"), BACK_MENU);
+}
+
 // /budget         -> lihat budget & pemakaian
 // /budget 3jt     -> set budget bulanan
 // /budget off     -> matikan
@@ -1138,7 +1296,8 @@ function helpText() {
     "",
     "Pengeluaran: 50rb makan siang  (atau -50rb makan)",
     "Pemasukan  : +5jt gaji  (pakai tanda +)",
-    "Tarik tunai: tarik 500rb  (tidak dihitung pengeluaran)",
+    "Tarik tunai: tarik 500rb  (Bank->Cash, bukan pengeluaran)",
+    "Dompet     : tambah @nama, mis '50rb makan @gopay'",
     "Foto struk : kirim fotonya (jadi pengeluaran)",
     "  caption 'piutang andi' / 'hutang budi' / 'tarik' untuk jenis lain",
     "Kategori   : otomatis; paksa dgn #tag (mis. 100rb #arisan)",
@@ -1162,6 +1321,12 @@ function helpText() {
     "/total — total sepanjang waktu",
     "/export — unduh CSV",
     "/hari — tanggal & hari sekarang",
+    "",
+    "Dompet:",
+    "/saldo — saldo per dompet",
+    "/dompet — kelola dompet (tambah/hapus/utama)",
+    "/pindah 200rb bank gopay — transfer antar dompet",
+    "",
     "/edit — pilih catatan utk ubah/hapus",
     "/hapus — hapus catatan terakhir",
     "/hapusall — hapus semua (perlu konfirmasi)",
@@ -1184,12 +1349,13 @@ const MENU_MAIN = {
       ],
       [
         { text: "📋 Hutang/Piutang", callback_data: "cat_utang" },
-        { text: "🎯 Budget", callback_data: "cat_budget" },
+        { text: "👛 Dompet", callback_data: "cat_dompet" },
       ],
       [
+        { text: "🎯 Budget", callback_data: "cat_budget" },
         { text: "🧰 Lainnya", callback_data: "cat_lain" },
-        { text: "❓ Bantuan", callback_data: "help" },
       ],
+      [{ text: "❓ Bantuan", callback_data: "help" }],
     ],
   },
 };
@@ -1244,6 +1410,21 @@ const MENU_UTANG = {
 const MENU_BUDGET = {
   reply_markup: {
     inline_keyboard: [[{ text: "🎯 Lihat budget", callback_data: "budget" }], [BACK_BTN]],
+  },
+};
+const MENU_DOMPET = {
+  reply_markup: {
+    inline_keyboard: [
+      [
+        { text: "👛 Saldo", callback_data: "saldo" },
+        { text: "⚙️ Kelola", callback_data: "dompet" },
+      ],
+      [
+        { text: "💵 Tarik tunai", callback_data: "add_mutasi" },
+        { text: "🔁 Pindah", callback_data: "add_pindah" },
+      ],
+      [BACK_BTN],
+    ],
   },
 };
 const MENU_LAIN = {
@@ -1343,10 +1524,16 @@ function capitalize(s) {
 // Pengeluaran = default (tanpa tanda) atau diawali '-'; pemasukan diawali '+'.
 function parseFlow(text) {
   let kind = "keluar";
+  let move = "";
   let t = text;
   if (/^(tarik\s*tunai|tarik|tunai)\b/i.test(t)) {
-    kind = "mutasi"; // tarik tunai: pindah rekening->cash, bukan pengeluaran
+    kind = "mutasi"; // tarik tunai: pindah bank->cash, bukan pengeluaran
+    move = "tarik";
     t = t.replace(/^(tarik\s*tunai|tarik|tunai)\s*/i, "");
+  } else if (/^(pindah|transfer)\b/i.test(t)) {
+    kind = "mutasi"; // pindah antar dompet
+    move = "pindah";
+    t = t.replace(/^(pindah|transfer)\s*/i, "");
   } else if (t.startsWith("+")) {
     kind = "masuk";
     t = t.slice(1).trim();
@@ -1356,7 +1543,7 @@ function parseFlow(text) {
   }
   const p = parseAmountToken(t);
   if (!p) return null;
-  return { kind, amount: p.amount, note: p.rest || "(tanpa keterangan)" };
+  return { kind, move, amount: p.amount, note: p.rest || "(tanpa keterangan)" };
 }
 
 // Ambil angka pertama (+suffix rb/jt/k) dari teks; kembalikan { amount, rest }.

@@ -10,6 +10,7 @@ Bot Telegram untuk mencatat keuangan pribadi, jalan di **Cloudflare Worker**.
 - 📈 **Grafik** pai per kategori: `/grafik`
 - 📅 **Laporan bulan tertentu**: `/laporan agustus` atau `/laporan 2026-08`
 - 🔍 **Cari** transaksi: `/cari grab`
+- 👛 **Dompet**: lacak saldo per tempat uang (Cash, Bank, GoPay…). Tag `@gopay` di catatan, `/saldo`, `/dompet` (tambah/hapus/utama), `pindah 200rb bank gopay`. Tarik tunai otomatis pindah Bank→Cash.
 - ✅ **Lunasi**: `/lunas` (lihat daftar), `/lunas 2` (lunasi nomor 2)
 - 🎯 **Budget bulanan**: `/budget 3jt` set batas, peringatan otomatis saat mendekati/lewat; tiap catat pengeluaran langsung tampil sisa budget
 - 🏷️ **Kategori otomatis** dari kata kunci (atau paksa dengan `#tag`), lengkap dengan rekap per kategori di laporan
