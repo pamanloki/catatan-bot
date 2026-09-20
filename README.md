@@ -50,6 +50,15 @@ Model vision gratis Cloudflare kurang jago baca angka di struk. Untuk hasil jauh
    https://api.telegram.org/bot<BOT_TOKEN>/setWebhook?url=<WORKER_URL>&secret_token=<TELEGRAM_SECRET>
    ```
 
+## Rekap bulanan otomatis (Cron)
+
+Bot bisa mengirim laporan bulan lalu otomatis tiap awal bulan.
+1. Worker → **Settings → Triggers → Cron Triggers → Add Cron Trigger**.
+2. Isi jadwal: `0 0 1 * *` (tanggal 1 tiap bulan, 00:00 UTC = 07:00 WIB).
+3. **Deploy**.
+
+Handler `scheduled` di worker akan mengirim rekap bulan sebelumnya ke tiap pengguna yang punya transaksi. (Aman kalau cron diisi harian `0 0 * * *` juga — bot hanya mengirim saat tanggal 1.)
+
 ## Catatan
 
 - Data disimpan di **Cloudflare KV** (gratis di tier dasar), per user Telegram.

@@ -29,7 +29,45 @@ export default {
       headers: { "content-type": "text/plain; charset=utf-8" },
     });
   },
+
+  // Dijalankan oleh Cron Trigger (mis. tiap hari 00:00 UTC = 07:00 WIB).
+  async scheduled(event, env, ctx) {
+    ctx.waitUntil(runScheduled(env));
+  },
 };
+
+// Rekap bulanan otomatis: setiap tanggal 1 (WIB), kirim laporan bulan lalu.
+async function runScheduled(env) {
+  if (!env.EXPENSES) return;
+  const now = wibParts(Date.now());
+  if (now.d !== 1) return; // hanya di awal bulan
+
+  let y = now.y;
+  let m = now.m - 1;
+  if (m < 1) { m = 12; y -= 1; }
+  const target = { y, m };
+
+  let cursor;
+  do {
+    const res = await env.EXPENSES.list({ prefix: "exp:", cursor });
+    for (const k of res.keys) {
+      const uid = k.name.slice(4);
+      try {
+        const list = JSON.parse((await env.EXPENSES.get(k.name)) || "[]");
+        const key = target.y * 100 + target.m;
+        const ada = list.some(
+          (e) => (e.kind === "masuk" || e.kind === "keluar") && wibParts(e.ts).y * 100 + wibParts(e.ts).m === key,
+        );
+        if (!ada) continue; // lewati user tanpa transaksi bln itu
+        await sendMessage(env, uid, `📅 Rekap otomatis ${NAMA_BULAN[target.m - 1]} ${target.y}:`);
+        await monthlyReport(env, uid, uid, list, target, BACK_MENU);
+      } catch {
+        /* lanjut user berikutnya */
+      }
+    }
+    cursor = res.cursor;
+  } while (cursor);
+}
 
 // ---------------------------------------------------------------------------
 // Telegram
