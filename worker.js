@@ -86,6 +86,7 @@ async function routeMessage(env, chatId, msg) {
   if (lower.startsWith("/hari") || lower.startsWith("/tanggal")) return sendMessage(env, chatId, `📆 Sekarang: ${namaHariTanggal(Date.now())} (WIB)`);
   if (lower.startsWith("/budget")) return handleBudget(env, chatId, uid, text.slice(7).trim());
   if (lower.startsWith("/lunas")) return handleLunas(env, chatId, uid, text.slice(6).trim());
+  if (lower.startsWith("/utang") || lower.startsWith("/rekaputang")) return sendDebtReport(env, chatId, uid);
   if (lower.startsWith("/hutang")) return handleDebt(env, chatId, uid, "hutang", text.slice(7).trim());
   if (lower.startsWith("/piutang")) return handleDebt(env, chatId, uid, "piutang", text.slice(8).trim());
 
@@ -346,6 +347,41 @@ function openDebtsOrdered(list) {
   return list
     .filter((e) => (e.kind === "hutang" || e.kind === "piutang") && e.status === "belum")
     .sort((a, b) => a.ts - b.ts);
+}
+
+// Laporan gabungan hutang & piutang (yang belum lunas).
+async function sendDebtReport(env, chatId, uid) {
+  const list = await getEntries(env, uid);
+  const hutang = list.filter((e) => e.kind === "hutang" && e.status === "belum").sort((a, b) => a.ts - b.ts);
+  const piutang = list.filter((e) => e.kind === "piutang" && e.status === "belum").sort((a, b) => a.ts - b.ts);
+
+  if (!hutang.length && !piutang.length) {
+    return sendMessage(env, chatId, "🎉 Tidak ada hutang/piutang yang belum lunas.");
+  }
+
+  const totalH = hutang.reduce((s, e) => s + e.amount, 0);
+  const totalP = piutang.reduce((s, e) => s + e.amount, 0);
+  const lines = ["📊 Rekap Hutang & Piutang", ""];
+
+  lines.push(`📕 Hutang (kamu pinjam) — ${fmtRp(totalH)}`);
+  if (hutang.length) {
+    for (const e of hutang) lines.push(`• ${fmtRp(e.amount)} — ${e.party} (${e.note})`);
+  } else {
+    lines.push("• (tidak ada)");
+  }
+
+  lines.push("", `📗 Piutang (orang pinjam) — ${fmtRp(totalP)}`);
+  if (piutang.length) {
+    for (const e of piutang) lines.push(`• ${fmtRp(e.amount)} — ${e.party} (${e.note})`);
+  } else {
+    lines.push("• (tidak ada)");
+  }
+
+  const selisih = totalP - totalH;
+  const tanda = selisih >= 0 ? "surplus" : "defisit";
+  lines.push("", `⚖️ Selisih (piutang − hutang): ${fmtRp(Math.abs(selisih))} ${tanda}`);
+  lines.push("", "Lunasi dengan: /lunas");
+  return sendMessage(env, chatId, lines.join("\n"));
 }
 
 // /lunas        -> tampilkan daftar bernomor
@@ -634,6 +670,7 @@ function helpText() {
     "Hutang/Piutang:",
     "/hutang 100rb budi beli bensin  (kamu pinjam)",
     "/piutang 50rb ani               (orang pinjam ke kamu)",
+    "/utang                          (rekap hutang & piutang)",
     "/lunas                          (lihat & lunasi)",
     "",
     "Budget:",
