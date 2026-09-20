@@ -1,21 +1,22 @@
-// Bot catatan pengeluaran untuk Telegram (Cloudflare Worker).
+// Bot catatan keuangan untuk Telegram (Cloudflare Worker).
 //
 // Cara pakai (kirim ke bot):
-//   - Catat manual : "50rb makan siang"  /  "12000 parkir"  /  "1,5jt sewa"
-//   - Foto struk   : kirim foto struk -> total & toko dibaca AI otomatis
-//   - /laporan     : rekap hari ini + bulan ini
-//   - /total       : total sepanjang waktu
-//   - /hapus       : hapus catatan terakhir
-//   - /start, /help: bantuan
+//   Pengeluaran : "50rb makan siang"  /  "12000 parkir"
+//   Pemasukan   : "+5jt gaji"  (awali dengan tanda +)
+//   Foto struk  : kirim foto struk -> total & toko dibaca AI (jadi pengeluaran)
+//   Hutang (aku pinjam ke orang)     : /hutang 100rb budi beli bensin
+//   Piutang (orang pinjam ke aku)    : /piutang 50rb ani
+//   Lihat & lunasi hutang/piutang    : /lunas          (lihat daftar)
+//                                      /lunas 2         (lunasi nomor 2)
+//   Laporan     : /laporan
+//   Total       : /total
+//   Export CSV  : /export
+//   Hapus akhir : /hapus
+//   Bantuan     : /start, /help
 //
-// Yang perlu disiapkan di dashboard Cloudflare Worker:
-//   Secrets (Settings > Variables and Secrets, tipe Secret):
-//     - BOT_TOKEN       : token dari @BotFather (wajib)
-//     - TELEGRAM_SECRET : token rahasia webhook (disarankan)
-//     - ALLOWED_IDS     : daftar ID Telegram yang boleh pakai, dipisah koma (privat)
-//   Bindings:
-//     - KV Namespace  -> variable name: EXPENSES  (penyimpanan catatan)
-//     - Workers AI    -> variable name: AI        (untuk baca foto struk)
+// Siapkan di dashboard Cloudflare Worker:
+//   Secrets: BOT_TOKEN (wajib), TELEGRAM_SECRET (disarankan), ALLOWED_IDS (privat)
+//   Bindings: KV Namespace -> "EXPENSES" ; Workers AI -> "AI"
 
 const WIB_OFFSET_MS = 7 * 60 * 60 * 1000; // Asia/Jakarta (UTC+7)
 const AI_VISION_MODEL = "@cf/meta/llama-3.2-11b-vision-instruct";
@@ -23,7 +24,7 @@ const AI_VISION_MODEL = "@cf/meta/llama-3.2-11b-vision-instruct";
 export default {
   async fetch(request, env) {
     if (request.method === "POST") return handleTelegram(request, env);
-    return new Response("Bot catatan pengeluaran aktif.", {
+    return new Response("Bot catatan keuangan aktif.", {
       headers: { "content-type": "text/plain; charset=utf-8" },
     });
   },
@@ -64,50 +65,53 @@ async function handleTelegram(request, env) {
   return new Response("ok");
 }
 
-// Tentukan apa yang harus dilakukan dari sebuah pesan.
 async function routeMessage(env, chatId, msg) {
+  const uid = msg.from.id;
+
   // Foto struk?
   if (Array.isArray(msg.photo) && msg.photo.length) {
     return handleReceiptPhoto(env, chatId, msg);
   }
 
   const text = (msg.text || "").trim();
-  if (!text) {
-    return sendMessage(env, chatId, "Kirim catatan (mis. '50rb makan siang') atau foto struk ya.");
-  }
+  if (!text) return sendMessage(env, chatId, "Kirim catatan (mis. '50rb makan') atau foto struk.");
 
   const lower = text.toLowerCase();
   if (lower === "/start" || lower === "/help") return sendMessage(env, chatId, helpText());
-  if (lower.startsWith("/laporan")) return sendReport(env, chatId, msg.from.id);
-  if (lower.startsWith("/total")) return sendTotal(env, chatId, msg.from.id);
-  if (lower.startsWith("/hapus")) return deleteLast(env, chatId, msg.from.id);
+  if (lower.startsWith("/laporan")) return sendReport(env, chatId, uid);
+  if (lower.startsWith("/total")) return sendTotal(env, chatId, uid);
+  if (lower.startsWith("/export")) return exportCsv(env, chatId, uid);
+  if (lower.startsWith("/hapus")) return deleteLast(env, chatId, uid);
+  if (lower.startsWith("/lunas")) return handleLunas(env, chatId, uid, text.slice(6).trim());
+  if (lower.startsWith("/hutang")) return handleDebt(env, chatId, uid, "hutang", text.slice(7).trim());
+  if (lower.startsWith("/piutang")) return handleDebt(env, chatId, uid, "piutang", text.slice(8).trim());
 
-  // Selain itu, anggap sebagai catatan manual.
-  const parsed = parseEntry(text);
-  if (!parsed) {
+  // Selain perintah -> catatan arus kas (pengeluaran / pemasukan).
+  const flow = parseFlow(text);
+  if (!flow) {
     return sendMessage(
       env,
       chatId,
-      "Format belum kebaca. Contoh: '50rb makan siang', '12000 parkir', '1,5jt sewa'.",
+      "Format belum kebaca.\nPengeluaran: '50rb makan'\nPemasukan: '+5jt gaji'",
     );
   }
-  await addEntry(env, msg.from.id, { ...parsed, src: "teks" });
-  return sendMessage(
-    env,
-    chatId,
-    `✅ Tercatat: ${fmtRp(parsed.amount)} — ${parsed.note}`,
-  );
+  await addEntry(env, uid, { kind: flow.kind, amount: flow.amount, note: flow.note, src: "teks" });
+  const label = flow.kind === "masuk" ? "Pemasukan" : "Pengeluaran";
+  const icon = flow.kind === "masuk" ? "🟢" : "🔴";
+  return sendMessage(env, chatId, `${icon} ${label} tercatat: ${fmtRp(flow.amount)} — ${flow.note}`);
 }
 
-// Baca foto struk pakai Workers AI, lalu simpan.
+// ---------------------------------------------------------------------------
+// Foto struk (Workers AI)
+// ---------------------------------------------------------------------------
+
 async function handleReceiptPhoto(env, chatId, msg) {
   if (!env.AI) {
     return sendMessage(env, chatId, "Fitur foto struk belum aktif (binding Workers AI 'AI' belum diset).");
   }
   await sendMessage(env, chatId, "📸 Membaca struk...");
 
-  // Ambil foto ukuran terbesar.
-  const photo = msg.photo[msg.photo.length - 1];
+  const photo = msg.photo[msg.photo.length - 1]; // ukuran terbesar
   const bytes = await getTelegramFile(env, photo.file_id);
 
   const result = await readReceipt(env, bytes);
@@ -120,17 +124,15 @@ async function handleReceiptPhoto(env, chatId, msg) {
   }
 
   const note = result.toko || (msg.caption || "").trim() || "struk";
-  await addEntry(env, msg.from.id, { amount: result.amount, note, src: "foto" });
-  return sendMessage(env, chatId, `✅ Tercatat dari struk: ${fmtRp(result.amount)} — ${note}`);
+  await addEntry(env, msg.from.id, { kind: "keluar", amount: result.amount, note, src: "foto" });
+  return sendMessage(env, chatId, `🔴 Pengeluaran (struk): ${fmtRp(result.amount)} — ${note}`);
 }
 
-// Minta AI mengekstrak total & toko dari gambar struk.
 async function readReceipt(env, arrayBuffer) {
   const prompt =
     "Ini foto struk belanja Indonesia. Temukan TOTAL akhir yang dibayar dan nama tokonya. " +
-    'Balas HANYA dengan JSON tanpa penjelasan, format: {"total": <angka rupiah, tanpa titik/koma>, "toko": "<nama toko>"}. ' +
-    'Kalau tidak yakin, isi total dengan 0.';
-
+    'Balas HANYA JSON tanpa penjelasan: {"total": <angka rupiah tanpa titik/koma>, "toko": "<nama toko>"}. ' +
+    "Kalau tidak yakin, isi total dengan 0.";
   let out;
   try {
     out = await env.AI.run(AI_VISION_MODEL, {
@@ -138,10 +140,9 @@ async function readReceipt(env, arrayBuffer) {
       prompt,
       max_tokens: 256,
     });
-  } catch (e) {
+  } catch {
     return null;
   }
-
   const raw = (out && (out.response || out.description || "")) + "";
   const m = raw.match(/\{[\s\S]*\}/);
   if (!m) return null;
@@ -155,7 +156,6 @@ async function readReceipt(env, arrayBuffer) {
   }
 }
 
-// Unduh file dari Telegram -> ArrayBuffer.
 async function getTelegramFile(env, fileId) {
   const info = await (
     await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/getFile?file_id=${fileId}`)
@@ -167,69 +167,210 @@ async function getTelegramFile(env, fileId) {
 }
 
 // ---------------------------------------------------------------------------
+// Hutang / Piutang
+// ---------------------------------------------------------------------------
+
+// /hutang 100rb budi beli bensin   -> kalau ada argumen: tambah
+// /hutang                          -> kalau kosong: tampilkan daftar terbuka
+async function handleDebt(env, chatId, uid, kind, args) {
+  if (!args) return listOpenDebts(env, chatId, uid, kind);
+
+  const p = parseAmountToken(args);
+  if (!p) return sendMessage(env, chatId, `Format: /${kind} 100rb <nama> [keterangan]`);
+  const parts = p.rest.split(/\s+/).filter(Boolean);
+  const party = parts.shift() || "-";
+  const note = parts.join(" ") || "(tanpa keterangan)";
+
+  await addEntry(env, uid, { kind, amount: p.amount, note, party, status: "belum", src: "teks" });
+  const label =
+    kind === "hutang"
+      ? `📕 Hutang dicatat: kamu pinjam ${fmtRp(p.amount)} ke ${party}`
+      : `📗 Piutang dicatat: ${party} pinjam ${fmtRp(p.amount)} ke kamu`;
+  return sendMessage(env, chatId, `${label}${note ? ` (${note})` : ""}`);
+}
+
+async function listOpenDebts(env, chatId, uid, kind) {
+  const list = await getEntries(env, uid);
+  const open = list.filter((e) => e.kind === kind && e.status === "belum");
+  if (!open.length) return sendMessage(env, chatId, `Tidak ada ${kind} yang belum lunas.`);
+
+  const title = kind === "hutang" ? "📕 Hutang belum lunas" : "📗 Piutang belum lunas";
+  const lines = [title, ""];
+  let total = 0;
+  // Nomor mengikuti urutan gabungan agar cocok dengan /lunas.
+  const openAll = openDebtsOrdered(list);
+  open.forEach((e) => {
+    const n = openAll.findIndex((x) => x.ts === e.ts) + 1;
+    total += e.amount;
+    lines.push(`${n}. ${fmtRp(e.amount)} — ${e.party} (${e.note})`);
+  });
+  lines.push("", `Total: ${fmtRp(total)}`, "", "Lunasi dengan: /lunas <nomor>");
+  return sendMessage(env, chatId, lines.join("\n"));
+}
+
+// Daftar semua hutang+piutang yang belum lunas, urut waktu (dipakai penomoran /lunas).
+function openDebtsOrdered(list) {
+  return list
+    .filter((e) => (e.kind === "hutang" || e.kind === "piutang") && e.status === "belum")
+    .sort((a, b) => a.ts - b.ts);
+}
+
+// /lunas        -> tampilkan daftar bernomor
+// /lunas 2      -> tandai nomor 2 sebagai lunas
+async function handleLunas(env, chatId, uid, arg) {
+  const list = await getEntries(env, uid);
+  const open = openDebtsOrdered(list);
+  if (!open.length) return sendMessage(env, chatId, "Tidak ada hutang/piutang yang belum lunas. 🎉");
+
+  if (!arg) {
+    const lines = ["Pilih yang mau dilunasi:", ""];
+    open.forEach((e, i) => {
+      const tag = e.kind === "hutang" ? "📕 hutang ke" : "📗 piutang dari";
+      lines.push(`${i + 1}. ${fmtRp(e.amount)} — ${tag} ${e.party} (${e.note})`);
+    });
+    lines.push("", "Ketik: /lunas <nomor>");
+    return sendMessage(env, chatId, lines.join("\n"));
+  }
+
+  const n = parseInt(arg, 10);
+  if (!n || n < 1 || n > open.length) {
+    return sendMessage(env, chatId, `Nomor tidak valid. Ketik /lunas untuk lihat daftar (1–${open.length}).`);
+  }
+  const target = open[n - 1];
+  const idx = list.findIndex((e) => e.ts === target.ts);
+  list[idx].status = "lunas";
+  list[idx].lunasTs = Date.now();
+  await saveEntries(env, uid, list);
+  const tag = target.kind === "hutang" ? "Hutang ke" : "Piutang dari";
+  return sendMessage(env, chatId, `✅ Lunas: ${tag} ${target.party} ${fmtRp(target.amount)}`);
+}
+
+// ---------------------------------------------------------------------------
 // Penyimpanan (Cloudflare KV)
 // ---------------------------------------------------------------------------
 
 function kvKey(uid) {
   return `exp:${uid}`;
 }
-
 async function getEntries(env, uid) {
   if (!env.EXPENSES) throw new Error("KV 'EXPENSES' belum di-bind");
   const raw = await env.EXPENSES.get(kvKey(uid));
   return raw ? JSON.parse(raw) : [];
 }
-
 async function saveEntries(env, uid, list) {
   await env.EXPENSES.put(kvKey(uid), JSON.stringify(list));
 }
-
 async function addEntry(env, uid, entry) {
   const list = await getEntries(env, uid);
-  list.push({ ts: Date.now(), amount: entry.amount, note: entry.note, src: entry.src });
+  list.push({
+    ts: Date.now(),
+    kind: entry.kind, // keluar | masuk | hutang | piutang
+    amount: entry.amount,
+    note: entry.note,
+    party: entry.party || "",
+    status: entry.status || "",
+    src: entry.src || "teks",
+  });
   await saveEntries(env, uid, list);
 }
 
 // ---------------------------------------------------------------------------
-// Laporan
+// Laporan & export
 // ---------------------------------------------------------------------------
 
 async function sendReport(env, chatId, uid) {
   const list = await getEntries(env, uid);
-  if (!list.length) return sendMessage(env, chatId, "Belum ada catatan. Kirim '50rb ...' atau foto struk dulu.");
+  if (!list.length) return sendMessage(env, chatId, "Belum ada catatan. Kirim '50rb ...' atau '+5jt gaji' dulu.");
 
   const now = wibParts(Date.now());
   const todayKey = now.y * 10000 + now.m * 100 + now.d;
   const monthKey = now.y * 100 + now.m;
 
-  let totalHari = 0;
-  let totalBulan = 0;
+  let masukBulan = 0, keluarBulan = 0, masukHari = 0, keluarHari = 0;
+  let hutangOpen = 0, piutangOpen = 0;
   const hariIni = [];
+
   for (const e of list) {
+    if (e.kind === "hutang" && e.status === "belum") hutangOpen += e.amount;
+    if (e.kind === "piutang" && e.status === "belum") piutangOpen += e.amount;
+    if (e.kind !== "masuk" && e.kind !== "keluar") continue;
+
     const p = wibParts(e.ts);
-    if (p.y * 100 + p.m === monthKey) totalBulan += e.amount;
+    if (p.y * 100 + p.m === monthKey) {
+      if (e.kind === "masuk") masukBulan += e.amount; else keluarBulan += e.amount;
+    }
     if (p.y * 10000 + p.m * 100 + p.d === todayKey) {
-      totalHari += e.amount;
+      if (e.kind === "masuk") masukHari += e.amount; else keluarHari += e.amount;
       hariIni.push(e);
     }
   }
 
   const lines = [`📊 Laporan (${pad(now.d)}/${pad(now.m)}/${now.y})`, ""];
-  lines.push(`Hari ini : ${fmtRp(totalHari)}`);
-  lines.push(`Bulan ini: ${fmtRp(totalBulan)}`);
+  lines.push("— Hari ini —");
+  lines.push(`🟢 Masuk : ${fmtRp(masukHari)}`);
+  lines.push(`🔴 Keluar: ${fmtRp(keluarHari)}`);
+  lines.push(`💰 Selisih: ${fmtRp(masukHari - keluarHari)}`);
+  lines.push("", "— Bulan ini —");
+  lines.push(`🟢 Masuk : ${fmtRp(masukBulan)}`);
+  lines.push(`🔴 Keluar: ${fmtRp(keluarBulan)}`);
+  lines.push(`💰 Saldo : ${fmtRp(masukBulan - keluarBulan)}`);
+  if (hutangOpen || piutangOpen) {
+    lines.push("", "— Belum lunas —");
+    if (hutangOpen) lines.push(`📕 Hutang : ${fmtRp(hutangOpen)}`);
+    if (piutangOpen) lines.push(`📗 Piutang: ${fmtRp(piutangOpen)}`);
+  }
   if (hariIni.length) {
     lines.push("", "Rincian hari ini:");
     for (const e of hariIni) {
-      lines.push(`• ${fmtRp(e.amount)} — ${e.note}${e.src === "foto" ? " 🧾" : ""}`);
+      const icon = e.kind === "masuk" ? "🟢" : "🔴";
+      lines.push(`${icon} ${fmtRp(e.amount)} — ${e.note}${e.src === "foto" ? " 🧾" : ""}`);
     }
   }
+  lines.push("", "Export lengkap: /export");
   return sendMessage(env, chatId, lines.join("\n"));
 }
 
 async function sendTotal(env, chatId, uid) {
   const list = await getEntries(env, uid);
-  const total = list.reduce((s, e) => s + e.amount, 0);
-  return sendMessage(env, chatId, `Total sepanjang waktu: ${fmtRp(total)} (${list.length} catatan)`);
+  let masuk = 0, keluar = 0;
+  for (const e of list) {
+    if (e.kind === "masuk") masuk += e.amount;
+    if (e.kind === "keluar") keluar += e.amount;
+  }
+  return sendMessage(
+    env,
+    chatId,
+    `Sepanjang waktu:\n🟢 Masuk : ${fmtRp(masuk)}\n🔴 Keluar: ${fmtRp(keluar)}\n💰 Saldo : ${fmtRp(masuk - keluar)}`,
+  );
+}
+
+// Export semua catatan sebagai file CSV (buka rapi di Excel / Google Sheets).
+async function exportCsv(env, chatId, uid) {
+  const list = await getEntries(env, uid);
+  if (!list.length) return sendMessage(env, chatId, "Belum ada catatan untuk diexport.");
+
+  const header = ["Tanggal", "Waktu", "Jenis", "Jumlah", "Keterangan", "Pihak", "Status", "Sumber"];
+  const rows = [header.map(csvCell).join(",")];
+  for (const e of [...list].sort((a, b) => a.ts - b.ts)) {
+    const d = new Date(e.ts + WIB_OFFSET_MS);
+    const tgl = `${pad(d.getUTCDate())}/${pad(d.getUTCMonth() + 1)}/${d.getUTCFullYear()}`;
+    const jam = `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}`;
+    rows.push(
+      [tgl, jam, e.kind, e.amount, e.note, e.party || "", e.status || "", e.src || ""]
+        .map(csvCell)
+        .join(","),
+    );
+  }
+  const csv = "﻿" + rows.join("\r\n"); // BOM biar Excel baca UTF-8 dgn benar
+
+  const now = wibParts(Date.now());
+  const fname = `laporan-${now.y}${pad(now.m)}${pad(now.d)}.csv`;
+  await sendDocument(env, chatId, csv, fname, "📄 Laporan lengkap (buka di Excel / Google Sheets).");
+}
+
+function csvCell(v) {
+  const s = String(v == null ? "" : v);
+  return /[",\r\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
 }
 
 async function deleteLast(env, chatId, uid) {
@@ -237,7 +378,7 @@ async function deleteLast(env, chatId, uid) {
   if (!list.length) return sendMessage(env, chatId, "Tidak ada catatan untuk dihapus.");
   const last = list.pop();
   await saveEntries(env, uid, list);
-  return sendMessage(env, chatId, `🗑️ Dihapus: ${fmtRp(last.amount)} — ${last.note}`);
+  return sendMessage(env, chatId, `🗑️ Dihapus: ${last.kind} ${fmtRp(last.amount)} — ${last.note}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -246,59 +387,67 @@ async function deleteLast(env, chatId, uid) {
 
 function helpText() {
   return [
-    "🧾 Bot Catatan Pengeluaran",
+    "🧾 Bot Catatan Keuangan",
     "",
-    "Catat manual:",
-    "• 50rb makan siang",
-    "• 12000 parkir",
-    "• 1,5jt sewa kos",
+    "Pengeluaran: 50rb makan siang",
+    "Pemasukan  : +5jt gaji  (pakai tanda +)",
+    "Foto struk : kirim fotonya (jadi pengeluaran)",
     "",
-    "Foto struk: kirim fotonya, nanti totalnya dibaca otomatis.",
+    "Hutang/Piutang:",
+    "/hutang 100rb budi beli bensin  (kamu pinjam)",
+    "/piutang 50rb ani               (orang pinjam ke kamu)",
+    "/lunas                          (lihat & lunasi)",
     "",
-    "Perintah:",
-    "/laporan — rekap hari ini & bulan ini",
+    "Laporan & data:",
+    "/laporan — rekap hari & bulan ini",
     "/total — total sepanjang waktu",
+    "/export — unduh CSV",
     "/hapus — hapus catatan terakhir",
   ].join("\n");
 }
 
-// Ubah teks jadi { amount, note }. Mendukung rb/ribu/k, jt/juta, dan pemisah ribuan.
-function parseEntry(text) {
+// Pengeluaran default; pemasukan kalau diawali '+'.
+function parseFlow(text) {
+  let kind = "keluar";
+  let t = text;
+  if (t.startsWith("+")) {
+    kind = "masuk";
+    t = t.slice(1).trim();
+  }
+  const p = parseAmountToken(t);
+  if (!p) return null;
+  return { kind, amount: p.amount, note: p.rest || "(tanpa keterangan)" };
+}
+
+// Ambil angka pertama (+suffix rb/jt/k) dari teks; kembalikan { amount, rest }.
+function parseAmountToken(text) {
   const m = text.match(/(\d+(?:[.,]\d+)?)\s*(jt|juta|rb|ribu|k)?/i);
   if (!m) return null;
   const suf = (m[2] || "").toLowerCase();
   let amount;
-  if (suf === "jt" || suf === "juta") {
-    amount = parseFloat(m[1].replace(",", ".")) * 1e6;
-  } else if (suf === "rb" || suf === "ribu" || suf === "k") {
-    amount = parseFloat(m[1].replace(",", ".")) * 1e3;
-  } else {
-    amount = parseInt(m[1].replace(/[.,]/g, ""), 10); // buang pemisah ribuan
-  }
+  if (suf === "jt" || suf === "juta") amount = parseFloat(m[1].replace(",", ".")) * 1e6;
+  else if (suf === "rb" || suf === "ribu" || suf === "k") amount = parseFloat(m[1].replace(",", ".")) * 1e3;
+  else amount = parseInt(m[1].replace(/[.,]/g, ""), 10);
   if (!isFinite(amount) || amount <= 0) return null;
 
-  const note = text.replace(m[0], "").trim() || "(tanpa keterangan)";
-  return { amount: Math.round(amount), note };
+  const rest = (text.slice(0, m.index) + text.slice(m.index + m[0].length)).trim();
+  return { amount: Math.round(amount), rest };
 }
 
-// Pecah timestamp jadi tahun/bulan/tanggal menurut WIB.
 function wibParts(ts) {
   const d = new Date(ts + WIB_OFFSET_MS);
   return { y: d.getUTCFullYear(), m: d.getUTCMonth() + 1, d: d.getUTCDate() };
 }
-
 function pad(n) {
   return String(n).padStart(2, "0");
 }
-
 function fmtRp(n) {
   if (n == null || !isFinite(n)) return "Rp?";
   return "Rp" + Math.round(n).toLocaleString("id-ID");
 }
-
 function isAllowed(env, fromId, chatId) {
   const raw = (env.ALLOWED_IDS || "").trim();
-  if (!raw) return true; // kosong = terbuka untuk semua
+  if (!raw) return true;
   const allow = raw.split(",").map((s) => s.trim()).filter(Boolean);
   return allow.includes(String(fromId)) || allow.includes(String(chatId));
 }
@@ -309,5 +458,17 @@ async function sendMessage(env, chatId, text) {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ chat_id: chatId, text, disable_web_page_preview: true }),
+  });
+}
+
+async function sendDocument(env, chatId, content, filename, caption) {
+  if (!env.BOT_TOKEN) throw new Error("BOT_TOKEN belum diset");
+  const form = new FormData();
+  form.append("chat_id", String(chatId));
+  if (caption) form.append("caption", caption);
+  form.append("document", new Blob([content], { type: "text/csv" }), filename);
+  await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/sendDocument`, {
+    method: "POST",
+    body: form,
   });
 }

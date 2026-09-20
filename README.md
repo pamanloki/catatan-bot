@@ -1,11 +1,16 @@
 # catatan-bot
 
-Bot Telegram untuk mencatat pengeluaran, jalan di **Cloudflare Worker**.
+Bot Telegram untuk mencatat keuangan pribadi, jalan di **Cloudflare Worker**.
 
-- 📝 Catat manual: kirim `50rb makan siang`, `12000 parkir`, `1,5jt sewa`
-- 📸 Foto struk: kirim foto → total & toko dibaca **Workers AI** otomatis
-- 📊 `/laporan` rekap hari ini + bulan ini
+- 🔴 **Pengeluaran**: `50rb makan siang`, `12000 parkir`
+- 🟢 **Pemasukan**: `+5jt gaji` (awali dengan tanda `+`)
+- 📸 **Foto struk**: kirim foto → total & toko dibaca **Workers AI** (jadi pengeluaran)
+- 📕 **Hutang** (kamu pinjam): `/hutang 100rb budi beli bensin`
+- 📗 **Piutang** (orang pinjam ke kamu): `/piutang 50rb ani`
+- ✅ **Lunasi**: `/lunas` (lihat daftar), `/lunas 2` (lunasi nomor 2)
+- 📊 `/laporan` rekap hari & bulan ini (masuk, keluar, saldo, hutang/piutang)
 - 💰 `/total` total sepanjang waktu
+- 📄 `/export` unduh **CSV** (buka rapi di Excel / Google Sheets)
 - 🗑️ `/hapus` hapus catatan terakhir
 - 🔒 Bisa dikunci privat lewat `ALLOWED_IDS`
 
@@ -34,5 +39,6 @@ Bot Telegram untuk mencatat pengeluaran, jalan di **Cloudflare Worker**.
 ## Catatan
 
 - Data disimpan di **Cloudflare KV** (gratis di tier dasar), per user Telegram.
-- Foto struk memakai **Workers AI** (ada jatah gratis harian). Akurasi tergantung kejelasan foto; kalau meleset, catat manual saja.
-- Waktu memakai zona **WIB (UTC+7)**.
+- Foto struk memakai **Workers AI** (jatah gratis harian); akurasi tergantung kejelasan foto.
+- Export memakai **CSV**, bukan PDF: membuat PDF di dalam Worker butuh library berat, sedangkan CSV ringan & langsung rapi saat dibuka di Excel/Google Sheets.
+- Zona waktu **WIB (UTC+7)**.
