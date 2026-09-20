@@ -121,9 +121,10 @@ const RECEIPT_PROMPT =
   "Ambil TOTAL akhir yang benar-benar dibayar — cari baris berlabel " +
   "TOTAL, GRAND TOTAL, TOTAL BAYAR, TOTAL BELANJA, atau TUNAI/BAYAR. " +
   "Jangan tertukar dengan subtotal, kembalian, atau pajak. " +
+  "Kalau ada baris 'Netto' atau 'Total', pakai nilai itu. " +
   "Ambil juga nama toko/merchant (biasanya di bagian paling atas struk). " +
-  'Balas HANYA JSON tanpa penjelasan apa pun: {"total": <angka rupiah, hanya digit tanpa titik/koma>, "toko": "<nama toko>"}. ' +
-  "Kalau total tidak terbaca, isi 0.";
+  "total = hanya digit tanpa titik/koma (mis. 209875). " +
+  "Meski foto agak terpotong/buram, tetap beri tebakan angka terbaikmu; jangan menolak.";
 
 async function handleReceiptPhoto(env, chatId, msg) {
   if (!env.AI && !env.GEMINI_API_KEY) {
@@ -182,7 +183,19 @@ async function readReceiptGemini(env, arrayBuffer) {
         ],
       },
     ],
-    generationConfig: { temperature: 0, maxOutputTokens: 256 },
+    generationConfig: {
+      temperature: 0,
+      maxOutputTokens: 2048, // beri ruang; model baru pakai token utk "berpikir"
+      responseMimeType: "application/json", // paksa balasan JSON, bukan kalimat
+      responseSchema: {
+        type: "object",
+        properties: {
+          total: { type: "integer" },
+          toko: { type: "string" },
+        },
+        required: ["total", "toko"],
+      },
+    },
   };
   let status = 0;
   let bodyText = "";
@@ -210,11 +223,13 @@ async function readReceiptGemini(env, arrayBuffer) {
     return { amount: 0, toko: "", debug: `Gemini: ${msg}` };
   }
 
-  const parts = j.candidates && j.candidates[0] && j.candidates[0].content && j.candidates[0].content.parts;
+  const cand = j.candidates && j.candidates[0];
+  const parts = cand && cand.content && cand.content.parts;
   const text = (parts || []).map((p) => p.text || "").join("");
   const parsed = parseReceiptJson(text);
   if (parsed && parsed.amount) return parsed;
-  return { amount: 0, toko: "", debug: `Gemini balas tapi total tak terbaca: ${text.slice(0, 120)}` };
+  const fr = cand && cand.finishReason ? ` [${cand.finishReason}]` : "";
+  return { amount: 0, toko: "", debug: `Gemini balas tapi total tak terbaca${fr}: ${text.slice(0, 120)}` };
 }
 
 async function readReceiptWorkersAI(env, arrayBuffer) {
