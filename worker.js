@@ -179,7 +179,9 @@ async function routeMessage(env, chatId, msg) {
 
   // Foto struk?
   if (Array.isArray(msg.photo) && msg.photo.length) {
-    return handleReceiptPhoto(env, chatId, msg);
+    const pmode = await getMode(env, uid);
+    if (pmode) await clearMode(env, uid);
+    return handleReceiptPhoto(env, chatId, msg, pmode);
   }
 
   const text = (msg.text || "").trim();
@@ -278,7 +280,7 @@ const RECEIPT_PROMPT =
   "total = hanya digit tanpa titik/koma (mis. 209875). " +
   "Meski foto agak terpotong/buram, tetap beri tebakan angka terbaikmu; jangan menolak.";
 
-async function handleReceiptPhoto(env, chatId, msg) {
+async function handleReceiptPhoto(env, chatId, msg, mode) {
   if (!env.AI && !env.GEMINI_API_KEY) {
     return sendMessage(env, chatId, "Fitur foto struk belum aktif (binding Workers AI 'AI' atau GEMINI_API_KEY belum diset).");
   }
@@ -297,15 +299,62 @@ async function handleReceiptPhoto(env, chatId, msg) {
     );
   }
 
-  const note = result.toko || (msg.caption || "").trim() || "struk";
+  const uid = msg.from.id;
+  // Tentukan jenis dari caption foto atau mode tombol yang aktif.
+  const cls = classifyPhoto(msg.caption || "", mode);
+
+  if (cls.kind === "hutang" || cls.kind === "piutang") {
+    const party = cls.party || "-";
+    const note = cls.note || result.toko || "struk";
+    await addEntry(env, uid, { kind: cls.kind, amount: result.amount, note, party, status: "belum", src: "foto" });
+    const label = cls.kind === "hutang" ? "📕 Hutang (struk)" : "📗 Piutang (struk)";
+    return sendMessage(env, chatId, `${label}: ${fmtRp(result.amount)} — ${party} (${note})`, BACK_MENU);
+  }
+
+  if (cls.kind === "masuk") {
+    const note = cls.note || result.toko || "pemasukan";
+    await addEntry(env, uid, { kind: "masuk", amount: result.amount, note, src: "foto" });
+    return sendMessage(env, chatId, `🟢 Pemasukan (struk): ${fmtRp(result.amount)} — ${note}`, BACK_MENU);
+  }
+
+  // default: pengeluaran
+  const note = cls.note || result.toko || "struk";
   const category = categorize(note);
-  await addEntry(env, msg.from.id, { kind: "keluar", amount: result.amount, note, category, src: "foto" });
-  const extra = await spendingSummaryLines(env, msg.from.id);
+  await addEntry(env, uid, { kind: "keluar", amount: result.amount, note, category, src: "foto" });
+  const extra = await spendingSummaryLines(env, uid);
   return sendMessage(
     env,
     chatId,
-    [`🔴 Pengeluaran (struk): ${fmtRp(result.amount)} — ${note} [${category}]`, ...extra].join("\n"),
+    [
+      `🔴 Pengeluaran (struk): ${fmtRp(result.amount)} — ${note} [${category}]`,
+      ...extra,
+      "",
+      "ℹ️ Kalau ini hutang/piutang: kirim ulang foto dgn caption 'piutang <nama>' atau 'hutang <nama>'.",
+    ].join("\n"),
+    BACK_MENU,
   );
+}
+
+// Tentukan jenis catatan dari caption foto / mode tombol.
+// caption: "piutang andi", "hutang budi bensin", "masuk", atau bebas (jadi keterangan).
+function classifyPhoto(caption, mode) {
+  const cap = caption.trim();
+  const m = cap.match(/^(hutang|piutang)\b\s*(.*)$/i);
+  if (m) {
+    const parts = m[2].split(/\s+/).filter(Boolean);
+    const party = parts.shift() || "";
+    return { kind: m[1].toLowerCase(), party, note: parts.join(" ") };
+  }
+  if (/^(masuk|pemasukan|\+)/i.test(cap)) {
+    return { kind: "masuk", note: cap.replace(/^(masuk|pemasukan|\+)\s*/i, "") };
+  }
+  if (mode === "hutang" || mode === "piutang") {
+    const parts = cap.split(/\s+/).filter(Boolean);
+    const party = parts.shift() || "";
+    return { kind: mode, party, note: parts.join(" ") };
+  }
+  if (mode === "masuk") return { kind: "masuk", note: cap };
+  return { kind: "keluar", note: cap };
 }
 
 // Pilih mesin OCR: Gemini (akurat) kalau key ada, kalau tidak Workers AI.
