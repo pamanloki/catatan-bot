@@ -549,7 +549,7 @@ async function confirmHapusAll(env, chatId, uid) {
     env,
     chatId,
     `⚠️ Yakin hapus SEMUA ${list.length} catatan? Ini tidak bisa dibatalkan.\n` +
-      "Backup dulu dengan /export.\n\nKetik *tepat*: /hapus all!  (pakai tanda seru) untuk lanjut.",
+      "Backup dulu dengan /export.\n\nKetik tepat: /hapusall!  (pakai tanda seru) untuk lanjut.",
   );
 }
 
@@ -646,7 +646,7 @@ function helpText() {
     "/export — unduh CSV",
     "/hari — tanggal & hari sekarang",
     "/hapus — hapus catatan terakhir",
-    "/hapus all — hapus semua (perlu konfirmasi)",
+    "/hapusall — hapus semua (perlu konfirmasi)",
   ].join("\n");
 }
 
