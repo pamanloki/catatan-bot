@@ -171,6 +171,9 @@ async function handleCallback(env, cq) {
       case "add_pindah":
         await setMode(env, uid, "pindah");
         return sendMessage(env, chatId, "🔁 Ketik: jumlah dari ke\ncontoh: 200rb bank gopay", BACK_MENU);
+      case "add_setsaldo":
+        await setMode(env, uid, "setsaldo");
+        return sendMessage(env, chatId, "💼 Ketik: nama_dompet jumlah\ncontoh: Bank 5jt", BACK_MENU);
       case "add_hutang":
         await setMode(env, uid, "hutang");
         return sendMessage(env, chatId, "📕 Ketik: nominal nama [ket] [tgl]\ncontoh: 100rb budi bensin tgl 15-3-2025", BACK_MENU);
@@ -296,6 +299,7 @@ async function handleModeInput(env, chatId, uid, mode, text) {
   if (mode === "masuk") return recordFlow(env, chatId, uid, "+" + text.replace(/^\+/, ""));
   if (mode === "mutasi") return recordFlow(env, chatId, uid, "tarik " + text);
   if (mode === "pindah") return recordFlow(env, chatId, uid, "pindah " + text);
+  if (mode === "setsaldo") return handleDompet(env, chatId, uid, "saldo " + text);
   if (mode === "hutang") return handleDebt(env, chatId, uid, "hutang", text);
   if (mode === "piutang") return handleDebt(env, chatId, uid, "piutang", text);
   if (mode.startsWith("edit_amount:")) {
@@ -1216,6 +1220,20 @@ async function handleDompet(env, chatId, uid, arg) {
     await saveConfig(env, uid, cfg);
     return sendMessage(env, chatId, `✅ Dompet utama: ${w}`, BACK_MENU);
   }
+  if (cmd === "saldo" || cmd === "set" || cmd === "isi") {
+    const toks = name.split(/\s+/).filter(Boolean);
+    const w = resolveWallet(toks.shift() || "", cfg);
+    if (!w) return sendMessage(env, chatId, `Format: /dompet saldo <nama> <jumlah>\nDompet: ${cfg.wallets.join(", ")}`, BACK_MENU);
+    const p = parseAmountToken(toks.join(" "));
+    if (!p) return sendMessage(env, chatId, "Jumlah tak terbaca. Contoh: /dompet saldo Bank 5jt", BACK_MENU);
+    const bal = walletBalances(await getEntries(env, uid), cfg);
+    const diff = p.amount - (bal[w] || 0);
+    if (diff === 0) return sendMessage(env, chatId, `Saldo ${w} sudah ${fmtRp(p.amount)}.`, BACK_MENU);
+    // Penyesuaian sebagai mutasi (tidak masuk pemasukan/pengeluaran).
+    if (diff > 0) await addEntry(env, uid, { kind: "mutasi", amount: diff, from: "", to: w, note: "set saldo awal" });
+    else await addEntry(env, uid, { kind: "mutasi", amount: -diff, from: w, to: "", note: "set saldo awal" });
+    return sendMessage(env, chatId, `✅ Saldo ${w} diset ke ${fmtRp(p.amount)}`, BACK_MENU);
+  }
 
   // tampilkan info + saldo
   const bal = walletBalances(await getEntries(env, uid), cfg);
@@ -1230,6 +1248,7 @@ async function handleDompet(env, chatId, uid, arg) {
     "/dompet tambah GoPay",
     "/dompet hapus GoPay",
     "/dompet utama Bank",
+    "/dompet saldo Bank 5jt  (set saldo awal)",
     "",
     "Pakai: '50rb makan @gopay' · pindah: 'pindah 200rb bank cash'",
   );
@@ -1423,6 +1442,7 @@ const MENU_DOMPET = {
         { text: "💵 Tarik tunai", callback_data: "add_mutasi" },
         { text: "🔁 Pindah", callback_data: "add_pindah" },
       ],
+      [{ text: "💼 Set saldo awal", callback_data: "add_setsaldo" }],
       [BACK_BTN],
     ],
   },
