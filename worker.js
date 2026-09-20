@@ -83,24 +83,36 @@ async function handleCallback(env, cq) {
 
   const uid = fromId;
   try {
+    if (data.startsWith("lunasi:")) {
+      const ts = Number(data.slice(7));
+      return settleByTs(env, chatId, uid, ts, BACK_MENU);
+    }
     switch (data) {
       case "menu": return sendMenu(env, chatId);
-      case "laporan": return sendReport(env, chatId, uid);
-      case "utang": return sendDebtReport(env, chatId, uid);
-      case "total": return sendTotal(env, chatId, uid);
-      case "budget": return handleBudget(env, chatId, uid, "");
-      case "lunas": return handleLunas(env, chatId, uid, "");
-      case "export": return exportCsv(env, chatId, uid);
-      case "hari": return sendMessage(env, chatId, `📆 Sekarang: ${namaHariTanggal(Date.now())} (WIB)`);
-      case "help": return sendMessage(env, chatId, helpText());
+      // Submenu kategori
+      case "cat_catat": return sendMessage(env, chatId, "➕ Catat transaksi:", MENU_CATAT);
+      case "cat_laporan": return sendMessage(env, chatId, "📊 Laporan & data:", MENU_LAPORAN);
+      case "cat_utang": return sendMessage(env, chatId, "📋 Hutang & Piutang:", MENU_UTANG);
+      case "cat_budget": return sendMessage(env, chatId, "🎯 Budget:", MENU_BUDGET);
+      case "cat_lain": return sendMessage(env, chatId, "🧰 Lainnya:", MENU_LAIN);
+      // Aksi (hasil selalu ada tombol balik)
+      case "laporan": return sendReport(env, chatId, uid, BACK_MENU);
+      case "utang": return sendDebtReport(env, chatId, uid, BACK_MENU);
+      case "total": return sendTotal(env, chatId, uid, BACK_MENU);
+      case "budget": return handleBudget(env, chatId, uid, "", BACK_MENU);
+      case "lunas": return handleLunas(env, chatId, uid, "", BACK_MENU);
+      case "export": return exportCsv(env, chatId, uid, BACK_MENU);
+      case "hari":
+        return sendMessage(env, chatId, `📆 Sekarang: ${namaHariTanggal(Date.now())} (WIB)`, BACK_MENU);
+      case "help": return sendMessage(env, chatId, helpText(), BACK_MENU);
       case "add_keluar":
-        return sendMessage(env, chatId, "Ketik pengeluaran, contoh:\n50rb makan siang\n20rb grab");
+        return sendMessage(env, chatId, "Ketik pengeluaran, contoh:\n50rb makan siang\n20rb grab", BACK_MENU);
       case "add_masuk":
-        return sendMessage(env, chatId, "Ketik pemasukan (pakai +), contoh:\n+5jt gaji");
+        return sendMessage(env, chatId, "Ketik pemasukan (pakai +), contoh:\n+5jt gaji", BACK_MENU);
       case "add_hutang":
-        return sendMessage(env, chatId, "Ketik, contoh:\n/hutang 100rb budi bensin");
+        return sendMessage(env, chatId, "Ketik, contoh:\n/hutang 100rb budi bensin", BACK_MENU);
       case "add_piutang":
-        return sendMessage(env, chatId, "Ketik, contoh:\n/piutang 50rb ani");
+        return sendMessage(env, chatId, "Ketik, contoh:\n/piutang 50rb ani", BACK_MENU);
     }
   } catch (e) {
     return sendMessage(env, chatId, "Error: " + (e && e.message ? e.message : e));
@@ -397,13 +409,13 @@ function openDebtsOrdered(list) {
 }
 
 // Laporan gabungan hutang & piutang (yang belum lunas).
-async function sendDebtReport(env, chatId, uid) {
+async function sendDebtReport(env, chatId, uid, markup) {
   const list = await getEntries(env, uid);
   const hutang = list.filter((e) => e.kind === "hutang" && e.status === "belum").sort((a, b) => a.ts - b.ts);
   const piutang = list.filter((e) => e.kind === "piutang" && e.status === "belum").sort((a, b) => a.ts - b.ts);
 
   if (!hutang.length && !piutang.length) {
-    return sendMessage(env, chatId, "🎉 Tidak ada hutang/piutang yang belum lunas.");
+    return sendMessage(env, chatId, "🎉 Tidak ada hutang/piutang yang belum lunas.", markup);
   }
 
   const totalH = hutang.reduce((s, e) => s + e.amount, 0);
@@ -428,37 +440,47 @@ async function sendDebtReport(env, chatId, uid) {
   const tanda = selisih >= 0 ? "surplus" : "defisit";
   lines.push("", `⚖️ Selisih (piutang − hutang): ${fmtRp(Math.abs(selisih))} ${tanda}`);
   lines.push("", "Lunasi dengan: /lunas");
-  return sendMessage(env, chatId, lines.join("\n"));
+  return sendMessage(env, chatId, lines.join("\n"), markup);
 }
 
 // /lunas        -> tampilkan daftar bernomor
 // /lunas 2      -> tandai nomor 2 sebagai lunas
-async function handleLunas(env, chatId, uid, arg) {
+async function handleLunas(env, chatId, uid, arg, markup) {
   const list = await getEntries(env, uid);
   const open = openDebtsOrdered(list);
-  if (!open.length) return sendMessage(env, chatId, "Tidak ada hutang/piutang yang belum lunas. 🎉");
+  if (!open.length) return sendMessage(env, chatId, "Tidak ada hutang/piutang yang belum lunas. 🎉", markup);
 
   if (!arg) {
-    const lines = ["Pilih yang mau dilunasi:", ""];
+    // Daftar + tombol tap untuk melunasi tiap item.
+    const lines = ["Pilih yang mau dilunasi (tap tombol):", ""];
+    const rows = [];
     open.forEach((e, i) => {
       const tag = e.kind === "hutang" ? "📕 hutang ke" : "📗 piutang dari";
       lines.push(`${i + 1}. ${fmtRp(e.amount)} — ${tag} ${e.party} (${e.note})`);
+      rows.push([{ text: `✅ Lunasi ${i + 1} — ${e.party}`, callback_data: `lunasi:${e.ts}` }]);
     });
-    lines.push("", "Ketik: /lunas <nomor>");
-    return sendMessage(env, chatId, lines.join("\n"));
+    rows.push([BACK_BTN]);
+    return sendMessage(env, chatId, lines.join("\n"), { reply_markup: { inline_keyboard: rows } });
   }
 
   const n = parseInt(arg, 10);
   if (!n || n < 1 || n > open.length) {
-    return sendMessage(env, chatId, `Nomor tidak valid. Ketik /lunas untuk lihat daftar (1–${open.length}).`);
+    return sendMessage(env, chatId, `Nomor tidak valid. Ketik /lunas untuk lihat daftar (1–${open.length}).`, markup);
   }
-  const target = open[n - 1];
-  const idx = list.findIndex((e) => e.ts === target.ts);
+  return settleByTs(env, chatId, uid, open[n - 1].ts, markup);
+}
+
+// Tandai satu hutang/piutang (berdasarkan ts) sebagai lunas.
+async function settleByTs(env, chatId, uid, ts, markup) {
+  const list = await getEntries(env, uid);
+  const idx = list.findIndex((e) => e.ts === ts && e.status === "belum");
+  if (idx === -1) return sendMessage(env, chatId, "Item sudah tidak ada / sudah lunas.", markup);
   list[idx].status = "lunas";
   list[idx].lunasTs = Date.now();
   await saveEntries(env, uid, list);
-  const tag = target.kind === "hutang" ? "Hutang ke" : "Piutang dari";
-  return sendMessage(env, chatId, `✅ Lunas: ${tag} ${target.party} ${fmtRp(target.amount)}`);
+  const t = list[idx];
+  const tag = t.kind === "hutang" ? "Hutang ke" : "Piutang dari";
+  return sendMessage(env, chatId, `✅ Lunas: ${tag} ${t.party} ${fmtRp(t.amount)}`, markup);
 }
 
 // ---------------------------------------------------------------------------
@@ -506,9 +528,9 @@ async function addEntry(env, uid, entry) {
 // Laporan & export
 // ---------------------------------------------------------------------------
 
-async function sendReport(env, chatId, uid) {
+async function sendReport(env, chatId, uid, markup) {
   const list = await getEntries(env, uid);
-  if (!list.length) return sendMessage(env, chatId, "Belum ada catatan. Kirim '50rb ...' atau '+5jt gaji' dulu.");
+  if (!list.length) return sendMessage(env, chatId, "Belum ada catatan. Kirim '50rb ...' atau '+5jt gaji' dulu.", markup);
 
   const now = wibParts(Date.now());
   const todayKey = now.y * 10000 + now.m * 100 + now.d;
@@ -570,10 +592,10 @@ async function sendReport(env, chatId, uid) {
     }
   }
   lines.push("", "Export lengkap: /export");
-  return sendMessage(env, chatId, lines.join("\n"));
+  return sendMessage(env, chatId, lines.join("\n"), markup);
 }
 
-async function sendTotal(env, chatId, uid) {
+async function sendTotal(env, chatId, uid, markup) {
   const list = await getEntries(env, uid);
   let masuk = 0, keluar = 0;
   for (const e of list) {
@@ -584,13 +606,14 @@ async function sendTotal(env, chatId, uid) {
     env,
     chatId,
     `Sepanjang waktu:\n🟢 Masuk : ${fmtRp(masuk)}\n🔴 Keluar: ${fmtRp(keluar)}\n💰 Saldo : ${fmtRp(masuk - keluar)}`,
+    markup,
   );
 }
 
 // Export semua catatan sebagai file CSV (buka rapi di Excel / Google Sheets).
-async function exportCsv(env, chatId, uid) {
+async function exportCsv(env, chatId, uid, markup) {
   const list = await getEntries(env, uid);
-  if (!list.length) return sendMessage(env, chatId, "Belum ada catatan untuk diexport.");
+  if (!list.length) return sendMessage(env, chatId, "Belum ada catatan untuk diexport.", markup);
 
   const header = ["Tanggal", "Waktu", "Jenis", "Jumlah", "Kategori", "Keterangan", "Pihak", "Status", "Sumber"];
   const rows = [header.map(csvCell).join(",")];
@@ -609,6 +632,7 @@ async function exportCsv(env, chatId, uid) {
   const now = wibParts(Date.now());
   const fname = `laporan-${now.y}${pad(now.m)}${pad(now.d)}.csv`;
   await sendDocument(env, chatId, csv, fname, "📄 Laporan lengkap (buka di Excel / Google Sheets).");
+  if (markup) await sendMessage(env, chatId, "Selesai. 👇", markup);
 }
 
 function csvCell(v) {
@@ -654,24 +678,24 @@ async function deleteLast(env, chatId, uid) {
 // /budget         -> lihat budget & pemakaian
 // /budget 3jt     -> set budget bulanan
 // /budget off     -> matikan
-async function handleBudget(env, chatId, uid, arg) {
+async function handleBudget(env, chatId, uid, arg, markup) {
   const cfg = await getConfig(env, uid);
 
   if (!arg) {
-    if (!cfg.budget) return sendMessage(env, chatId, "Belum ada budget. Set dengan: /budget 3jt");
+    if (!cfg.budget) return sendMessage(env, chatId, "Belum ada budget. Set dengan: /budget 3jt", markup);
     const extra = await spendingSummaryLines(env, uid);
-    return sendMessage(env, chatId, [`🎯 Budget bulanan: ${fmtRp(cfg.budget)}`, ...extra].join("\n"));
+    return sendMessage(env, chatId, [`🎯 Budget bulanan: ${fmtRp(cfg.budget)}`, ...extra].join("\n"), markup);
   }
   if (arg.toLowerCase() === "off" || arg === "0") {
     cfg.budget = 0;
     await saveConfig(env, uid, cfg);
-    return sendMessage(env, chatId, "🎯 Budget dimatikan.");
+    return sendMessage(env, chatId, "🎯 Budget dimatikan.", markup);
   }
   const p = parseAmountToken(arg);
-  if (!p) return sendMessage(env, chatId, "Format: /budget 3jt  (atau /budget off)");
+  if (!p) return sendMessage(env, chatId, "Format: /budget 3jt  (atau /budget off)", markup);
   cfg.budget = p.amount;
   await saveConfig(env, uid, cfg);
-  return sendMessage(env, chatId, `🎯 Budget bulanan diset: ${fmtRp(p.amount)}`);
+  return sendMessage(env, chatId, `🎯 Budget bulanan diset: ${fmtRp(p.amount)}`, markup);
 }
 
 // Ringkasan pemakaian bulan ini (+ status budget) untuk ditempel di konfirmasi.
@@ -736,38 +760,92 @@ function helpText() {
   ].join("\n");
 }
 
-// Grid tombol menu (inline keyboard) — tinggal tap, tidak perlu ketik.
-const MENU_KEYBOARD = {
-  inline_keyboard: [
-    [
-      { text: "📊 Laporan", callback_data: "laporan" },
-      { text: "📋 Utang", callback_data: "utang" },
+// Tombol balik ke menu utama (ditempel di tiap hasil).
+const BACK_BTN = { text: "🔙 Menu", callback_data: "menu" };
+const BACK_MENU = { reply_markup: { inline_keyboard: [[BACK_BTN]] } };
+
+// Menu utama: pilih kategori dulu.
+const MENU_MAIN = {
+  reply_markup: {
+    inline_keyboard: [
+      [
+        { text: "➕ Catat", callback_data: "cat_catat" },
+        { text: "📊 Laporan", callback_data: "cat_laporan" },
+      ],
+      [
+        { text: "📋 Hutang/Piutang", callback_data: "cat_utang" },
+        { text: "🎯 Budget", callback_data: "cat_budget" },
+      ],
+      [
+        { text: "🧰 Lainnya", callback_data: "cat_lain" },
+        { text: "❓ Bantuan", callback_data: "help" },
+      ],
     ],
-    [
-      { text: "💰 Total", callback_data: "total" },
-      { text: "🎯 Budget", callback_data: "budget" },
+  },
+};
+
+// Submenu per kategori (masing-masing ada tombol balik).
+const MENU_CATAT = {
+  reply_markup: {
+    inline_keyboard: [
+      [
+        { text: "🔴 + Keluar", callback_data: "add_keluar" },
+        { text: "🟢 + Masuk", callback_data: "add_masuk" },
+      ],
+      [BACK_BTN],
     ],
-    [
-      { text: "✅ Lunas", callback_data: "lunas" },
-      { text: "📄 Export CSV", callback_data: "export" },
+  },
+};
+const MENU_LAPORAN = {
+  reply_markup: {
+    inline_keyboard: [
+      [
+        { text: "📊 Laporan", callback_data: "laporan" },
+        { text: "💰 Total", callback_data: "total" },
+      ],
+      [
+        { text: "📄 Export CSV", callback_data: "export" },
+        { text: "📆 Hari ini", callback_data: "hari" },
+      ],
+      [BACK_BTN],
     ],
-    [
-      { text: "🔴 + Keluar", callback_data: "add_keluar" },
-      { text: "🟢 + Masuk", callback_data: "add_masuk" },
+  },
+};
+const MENU_UTANG = {
+  reply_markup: {
+    inline_keyboard: [
+      [
+        { text: "📋 Rekap", callback_data: "utang" },
+        { text: "✅ Lunas", callback_data: "lunas" },
+      ],
+      [
+        { text: "📕 + Hutang", callback_data: "add_hutang" },
+        { text: "📗 + Piutang", callback_data: "add_piutang" },
+      ],
+      [BACK_BTN],
     ],
-    [
-      { text: "📕 + Hutang", callback_data: "add_hutang" },
-      { text: "📗 + Piutang", callback_data: "add_piutang" },
+  },
+};
+const MENU_BUDGET = {
+  reply_markup: {
+    inline_keyboard: [[{ text: "🎯 Lihat budget", callback_data: "budget" }], [BACK_BTN]],
+  },
+};
+const MENU_LAIN = {
+  reply_markup: {
+    inline_keyboard: [
+      [
+        { text: "📄 Export CSV", callback_data: "export" },
+        { text: "📆 Hari ini", callback_data: "hari" },
+      ],
+      [{ text: "❓ Bantuan", callback_data: "help" }],
+      [BACK_BTN],
     ],
-    [
-      { text: "📆 Hari ini", callback_data: "hari" },
-      { text: "❓ Bantuan", callback_data: "help" },
-    ],
-  ],
+  },
 };
 
 async function sendMenu(env, chatId) {
-  return sendMessage(env, chatId, "📱 Menu — tinggal tap:", { reply_markup: MENU_KEYBOARD });
+  return sendMessage(env, chatId, "📱 Menu — pilih kategori:", MENU_MAIN);
 }
 
 async function answerCallback(env, callbackId) {
