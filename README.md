@@ -5,8 +5,11 @@ Bot Telegram untuk mencatat keuangan pribadi, jalan di **Cloudflare Worker**.
 - 🔴 **Pengeluaran**: `50rb makan siang`, `12000 parkir`
 - 🟢 **Pemasukan**: `+5jt gaji` (awali dengan tanda `+`)
 - 📸 **Foto struk**: kirim foto → total & toko dibaca **Workers AI** (jadi pengeluaran)
-- 📕 **Hutang** (kamu pinjam): `/hutang 100rb budi beli bensin`
+- 📕 **Hutang** (kamu pinjam): `/hutang 100rb budi beli bensin` — bisa set tanggal: `... tgl 15-3-2025`
 - 📗 **Piutang** (orang pinjam ke kamu): `/piutang 50rb ani`
+- 📈 **Grafik** pai per kategori: `/grafik`
+- 📅 **Laporan bulan tertentu**: `/laporan agustus` atau `/laporan 2026-08`
+- 🔍 **Cari** transaksi: `/cari grab`
 - ✅ **Lunasi**: `/lunas` (lihat daftar), `/lunas 2` (lunasi nomor 2)
 - 🎯 **Budget bulanan**: `/budget 3jt` set batas, peringatan otomatis saat mendekati/lewat; tiap catat pengeluaran langsung tampil sisa budget
 - 🏷️ **Kategori otomatis** dari kata kunci (atau paksa dengan `#tag`), lengkap dengan rekap per kategori di laporan

@@ -97,6 +97,9 @@ async function handleCallback(env, cq) {
       case "cat_lain": return sendMessage(env, chatId, "🧰 Lainnya:", MENU_LAIN);
       // Aksi (hasil selalu ada tombol balik)
       case "laporan": return sendReport(env, chatId, uid, BACK_MENU);
+      case "grafik": return sendChart(env, chatId, uid, BACK_MENU);
+      case "cari":
+        return sendMessage(env, chatId, "Ketik: /cari <kata>\nContoh: /cari grab", BACK_MENU);
       case "utang": return sendDebtReport(env, chatId, uid, BACK_MENU);
       case "total": return sendTotal(env, chatId, uid, BACK_MENU);
       case "budget": return handleBudget(env, chatId, uid, "", BACK_MENU);
@@ -138,7 +141,9 @@ async function routeMessage(env, chatId, msg) {
   if (lower === "/help") return sendMessage(env, chatId, helpText());
   if (lower.startsWith("/menu")) return sendMenu(env, chatId);
   if (lower.startsWith("/setup")) return setupMenuButton(env, chatId);
-  if (lower.startsWith("/laporan")) return sendReport(env, chatId, uid);
+  if (lower.startsWith("/laporan")) return sendReport(env, chatId, uid, undefined, text.slice(8).trim());
+  if (lower.startsWith("/grafik") || lower.startsWith("/chart")) return sendChart(env, chatId, uid);
+  if (lower.startsWith("/cari")) return handleCari(env, chatId, uid, text.slice(5).trim());
   if (lower.startsWith("/total")) return sendTotal(env, chatId, uid);
   if (lower.startsWith("/export")) return exportCsv(env, chatId, uid);
   if (lower.startsWith("/hapus")) return handleHapus(env, chatId, uid, text.slice(6).trim());
@@ -158,18 +163,20 @@ async function routeMessage(env, chatId, msg) {
       "Format belum kebaca.\nPengeluaran: '50rb makan'\nPemasukan: '+5jt gaji'",
     );
   }
-  const { category, note } = resolveCategory(flow.note);
-  await addEntry(env, uid, { kind: flow.kind, amount: flow.amount, note, category, src: "teks" });
+  const tgl = parseTanggal(flow.note);
+  const { category, note } = resolveCategory(tgl.rest);
+  await addEntry(env, uid, { kind: flow.kind, amount: flow.amount, note, category, ts: tgl.ts || 0, src: "teks" });
   const label = flow.kind === "masuk" ? "Pemasukan" : "Pengeluaran";
   const icon = flow.kind === "masuk" ? "🟢" : "🔴";
+  const tglTeks = tgl.ts ? `\n🗓️ ${namaHariTanggal(tgl.ts)}` : "";
   if (flow.kind === "masuk") {
-    return sendMessage(env, chatId, `${icon} ${label} tercatat: ${fmtRp(flow.amount)} — ${note}`);
+    return sendMessage(env, chatId, `${icon} ${label} tercatat: ${fmtRp(flow.amount)} — ${note}${tglTeks}`);
   }
   const extra = await spendingSummaryLines(env, uid);
   return sendMessage(
     env,
     chatId,
-    [`${icon} ${label} tercatat: ${fmtRp(flow.amount)} — ${note} [${category}]`, ...extra].join("\n"),
+    [`${icon} ${label} tercatat: ${fmtRp(flow.amount)} — ${note} [${category}]${tglTeks}`, ...extra].join("\n"),
   );
 }
 
@@ -369,17 +376,45 @@ async function handleDebt(env, chatId, uid, kind, args) {
   if (!args) return listOpenDebts(env, chatId, uid, kind);
 
   const p = parseAmountToken(args);
-  if (!p) return sendMessage(env, chatId, `Format: /${kind} 100rb <nama> [keterangan]`);
-  const parts = p.rest.split(/\s+/).filter(Boolean);
+  if (!p) return sendMessage(env, chatId, `Format: /${kind} 100rb <nama> [keterangan] [tgl 15-3-2025]`);
+
+  // Ambil tanggal kejadian bila ditulis (tgl 15-3-2025 / tanggal 15/3).
+  const tgl = parseTanggal(p.rest);
+  const parts = tgl.rest.split(/\s+/).filter(Boolean);
   const party = parts.shift() || "-";
   const note = parts.join(" ") || "(tanpa keterangan)";
 
-  await addEntry(env, uid, { kind, amount: p.amount, note, party, status: "belum", src: "teks" });
+  await addEntry(env, uid, {
+    kind, amount: p.amount, note, party, status: "belum", ts: tgl.ts || 0, src: "teks",
+  });
   const label =
     kind === "hutang"
       ? `📕 Hutang dicatat: kamu pinjam ${fmtRp(p.amount)} ke ${party}`
       : `📗 Piutang dicatat: ${party} pinjam ${fmtRp(p.amount)} ke kamu`;
-  return sendMessage(env, chatId, `${label}${note ? ` (${note})` : ""}`);
+  const tglTeks = tgl.ts ? `\n🗓️ Tanggal: ${namaHariTanggal(tgl.ts)}` : "";
+  return sendMessage(env, chatId, `${label}${note ? ` (${note})` : ""}${tglTeks}`);
+}
+
+// Ambil tanggal kejadian dari teks: "tgl 15-3-2025", "tanggal 15/3", "pada 1 1 2024".
+// Kembalikan { ts, rest }. Kalau tanpa tahun -> pakai tahun sekarang.
+function parseTanggal(s) {
+  const m = s.match(/(?:tgl|tanggal|pada)\s*[:=]?\s*(\d{1,2})[-/ ](\d{1,2})(?:[-/ ](\d{2,4}))?/i);
+  if (!m) return { ts: 0, rest: s };
+  const d = parseInt(m[1], 10);
+  const mo = parseInt(m[2], 10);
+  let y = m[3] ? parseInt(m[3], 10) : wibParts(Date.now()).y;
+  if (y < 100) y += 2000;
+  if (!d || d > 31 || !mo || mo > 12) return { ts: 0, rest: s };
+  // Tengah hari WIB pada tanggal itu (aman dari geser zona waktu).
+  const ts = Date.UTC(y, mo - 1, d, 12, 0, 0) - WIB_OFFSET_MS;
+  const rest = (s.slice(0, m.index) + s.slice(m.index + m[0].length)).replace(/\s+/g, " ").trim();
+  return { ts, rest };
+}
+
+// Tanggal singkat "15/03/2025" untuk ditampilkan di daftar.
+function tglPendek(ts) {
+  const p = wibParts(ts);
+  return `${pad(p.d)}/${pad(p.m)}/${p.y}`;
 }
 
 async function listOpenDebts(env, chatId, uid, kind) {
@@ -395,7 +430,7 @@ async function listOpenDebts(env, chatId, uid, kind) {
   open.forEach((e) => {
     const n = openAll.findIndex((x) => x.ts === e.ts) + 1;
     total += e.amount;
-    lines.push(`${n}. ${fmtRp(e.amount)} — ${e.party} (${e.note})`);
+    lines.push(`${n}. ${fmtRp(e.amount)} — ${e.party} (${e.note}) · ${tglPendek(e.ts)}`);
   });
   lines.push("", `Total: ${fmtRp(total)}`, "", "Lunasi dengan: /lunas <nomor>");
   return sendMessage(env, chatId, lines.join("\n"));
@@ -424,14 +459,14 @@ async function sendDebtReport(env, chatId, uid, markup) {
 
   lines.push(`📕 Hutang (kamu pinjam) — ${fmtRp(totalH)}`);
   if (hutang.length) {
-    for (const e of hutang) lines.push(`• ${fmtRp(e.amount)} — ${e.party} (${e.note})`);
+    for (const e of hutang) lines.push(`• ${fmtRp(e.amount)} — ${e.party} (${e.note}) · ${tglPendek(e.ts)}`);
   } else {
     lines.push("• (tidak ada)");
   }
 
   lines.push("", `📗 Piutang (orang pinjam) — ${fmtRp(totalP)}`);
   if (piutang.length) {
-    for (const e of piutang) lines.push(`• ${fmtRp(e.amount)} — ${e.party} (${e.note})`);
+    for (const e of piutang) lines.push(`• ${fmtRp(e.amount)} — ${e.party} (${e.note}) · ${tglPendek(e.ts)}`);
   } else {
     lines.push("• (tidak ada)");
   }
@@ -512,7 +547,7 @@ async function saveEntries(env, uid, list) {
 async function addEntry(env, uid, entry) {
   const list = await getEntries(env, uid);
   list.push({
-    ts: Date.now(),
+    ts: entry.ts || Date.now(), // bisa di-backdate (mis. hutang tahun lalu)
     kind: entry.kind, // keluar | masuk | hutang | piutang
     amount: entry.amount,
     note: entry.note,
@@ -528,9 +563,16 @@ async function addEntry(env, uid, entry) {
 // Laporan & export
 // ---------------------------------------------------------------------------
 
-async function sendReport(env, chatId, uid, markup) {
+async function sendReport(env, chatId, uid, markup, arg) {
   const list = await getEntries(env, uid);
   if (!list.length) return sendMessage(env, chatId, "Belum ada catatan. Kirim '50rb ...' atau '+5jt gaji' dulu.", markup);
+
+  // /laporan <bulan> -> laporan bulan tertentu
+  const target = arg ? parseMonthArg(arg) : null;
+  if (arg && !target) {
+    return sendMessage(env, chatId, "Bulan tidak dikenali. Contoh: /laporan agustus  atau  /laporan 2026-08", markup);
+  }
+  if (target) return monthlyReport(env, chatId, uid, list, target, markup);
 
   const now = wibParts(Date.now());
   const todayKey = now.y * 10000 + now.m * 100 + now.d;
@@ -592,6 +634,112 @@ async function sendReport(env, chatId, uid, markup) {
     }
   }
   lines.push("", "Export lengkap: /export");
+  return sendMessage(env, chatId, lines.join("\n"), markup);
+}
+
+// Laporan untuk bulan tertentu (dipakai /laporan <bulan>).
+async function monthlyReport(env, chatId, uid, list, target, markup) {
+  const key = target.y * 100 + target.m;
+  let masuk = 0, keluar = 0;
+  const perKategori = {};
+  for (const e of list) {
+    if (e.kind !== "masuk" && e.kind !== "keluar") continue;
+    const p = wibParts(e.ts);
+    if (p.y * 100 + p.m !== key) continue;
+    if (e.kind === "masuk") masuk += e.amount;
+    else {
+      keluar += e.amount;
+      const cat = e.category || "Lainnya";
+      perKategori[cat] = (perKategori[cat] || 0) + e.amount;
+    }
+  }
+  const lines = [`📊 Laporan — ${NAMA_BULAN[target.m - 1]} ${target.y}`, ""];
+  lines.push(`🟢 Masuk : ${fmtRp(masuk)}`);
+  lines.push(`🔴 Keluar: ${fmtRp(keluar)}`);
+  lines.push(`💰 Saldo : ${fmtRp(masuk - keluar)}`);
+  const urut = Object.entries(perKategori).sort((a, b) => b[1] - a[1]);
+  if (urut.length) {
+    lines.push("", "— Per kategori —");
+    for (const [cat, amt] of urut) {
+      const persen = keluar ? Math.round((amt / keluar) * 100) : 0;
+      lines.push(`• ${cat}: ${fmtRp(amt)} (${persen}%)`);
+    }
+  } else {
+    lines.push("", "(tidak ada transaksi bulan ini)");
+  }
+  return sendMessage(env, chatId, lines.join("\n"), markup);
+}
+
+// Parse argumen bulan: nama ("agustus"), angka ("8"), atau "2026-08".
+function parseMonthArg(arg) {
+  const s = arg.trim().toLowerCase();
+  const now = wibParts(Date.now());
+  let m2 = s.match(/^(\d{4})[-/](\d{1,2})$/);
+  if (m2) return { y: parseInt(m2[1], 10), m: parseInt(m2[2], 10) };
+  const idx = NAMA_BULAN.findIndex((b) => b.toLowerCase() === s);
+  if (idx >= 0) return { y: now.y, m: idx + 1 };
+  if (/^\d{1,2}$/.test(s)) {
+    const m = parseInt(s, 10);
+    if (m >= 1 && m <= 12) return { y: now.y, m };
+  }
+  return null;
+}
+
+// Grafik pai pengeluaran per kategori (bulan ini) via QuickChart.
+async function sendChart(env, chatId, uid, markup) {
+  const list = await getEntries(env, uid);
+  const now = wibParts(Date.now());
+  const key = now.y * 100 + now.m;
+  const perKategori = {};
+  for (const e of list) {
+    if (e.kind !== "keluar") continue;
+    const p = wibParts(e.ts);
+    if (p.y * 100 + p.m !== key) continue;
+    const cat = e.category || "Lainnya";
+    perKategori[cat] = (perKategori[cat] || 0) + e.amount;
+  }
+  const entries = Object.entries(perKategori).sort((a, b) => b[1] - a[1]);
+  if (!entries.length) {
+    return sendMessage(env, chatId, "Belum ada pengeluaran bulan ini untuk digambar.", markup || BACK_MENU);
+  }
+  const labels = entries.map((e) => e[0]);
+  const data = entries.map((e) => e[1]);
+  const config = {
+    type: "outlabeledPie",
+    data: {
+      labels,
+      datasets: [{ data, backgroundColor: ["#4e79a7","#f28e2b","#e15759","#76b7b2","#59a14f","#edc948","#b07aa1","#9c755f","#bab0ac"] }],
+    },
+    options: { plugins: { legend: { position: "bottom" }, outlabels: { text: "%l %p", stretch: 12 } } },
+  };
+  const url = "https://quickchart.io/chart?w=500&h=360&c=" + encodeURIComponent(JSON.stringify(config));
+  const total = data.reduce((s, x) => s + x, 0);
+  await sendPhoto(env, chatId, url, `📊 Pengeluaran ${namaBulan(now)} — total ${fmtRp(total)}`, markup || BACK_MENU);
+}
+
+// Cari transaksi berisi kata kunci.
+async function handleCari(env, chatId, uid, kw, markup) {
+  if (!kw) return sendMessage(env, chatId, "Ketik kata yang dicari, mis: /cari grab", markup);
+  const list = await getEntries(env, uid);
+  const q = kw.toLowerCase();
+  const hit = list.filter(
+    (e) =>
+      (e.note || "").toLowerCase().includes(q) ||
+      (e.party || "").toLowerCase().includes(q) ||
+      (e.category || "").toLowerCase().includes(q),
+  );
+  if (!hit.length) return sendMessage(env, chatId, `Tidak ada catatan mengandung "${kw}".`, markup);
+
+  hit.sort((a, b) => b.ts - a.ts);
+  const lines = [`🔍 Hasil "${kw}" (${hit.length}):`, ""];
+  let total = 0;
+  for (const e of hit.slice(0, 30)) {
+    const icon = e.kind === "masuk" ? "🟢" : e.kind === "keluar" ? "🔴" : "📘";
+    if (e.kind === "keluar") total += e.amount;
+    lines.push(`${icon} ${tglPendek(e.ts)} — ${fmtRp(e.amount)} — ${e.note}${e.party ? " / " + e.party : ""}`);
+  }
+  if (hit.length > 30) lines.push(`… dan ${hit.length - 30} lagi`);
+  lines.push("", `Total pengeluaran cocok: ${fmtRp(total)}`);
   return sendMessage(env, chatId, lines.join("\n"), markup);
 }
 
@@ -736,13 +884,14 @@ function helpText() {
     "Pengeluaran: 50rb makan siang  (atau -50rb makan)",
     "Pemasukan  : +5jt gaji  (pakai tanda +)",
     "Foto struk : kirim fotonya (jadi pengeluaran)",
-    "Kategori   : otomatis dari kata kunci; paksa dgn #tag (mis. 100rb #arisan)",
+    "Kategori   : otomatis; paksa dgn #tag (mis. 100rb #arisan)",
+    "Tanggal    : tambah 'tgl 15-3-2025' utk backdate",
     "",
     "Hutang/Piutang:",
-    "/hutang 100rb budi beli bensin  (kamu pinjam)",
-    "/piutang 50rb ani               (orang pinjam ke kamu)",
-    "/utang                          (rekap hutang & piutang)",
-    "/lunas                          (lihat & lunasi)",
+    "/hutang 100rb budi bensin tgl 15-3-2025  (kamu pinjam)",
+    "/piutang 50rb ani                        (orang pinjam ke kamu)",
+    "/utang                                   (rekap)",
+    "/lunas                                   (lihat & lunasi)",
     "",
     "Budget:",
     "/budget 3jt — set batas bulanan (auto-warning)",
@@ -750,6 +899,9 @@ function helpText() {
     "",
     "Laporan & data:",
     "/laporan — rekap hari & bulan ini",
+    "/laporan agustus — laporan bulan tertentu",
+    "/grafik — grafik pai per kategori",
+    "/cari grab — cari transaksi",
     "/total — total sepanjang waktu",
     "/export — unduh CSV",
     "/hari — tanggal & hari sekarang",
@@ -801,10 +953,14 @@ const MENU_LAPORAN = {
     inline_keyboard: [
       [
         { text: "📊 Laporan", callback_data: "laporan" },
-        { text: "💰 Total", callback_data: "total" },
+        { text: "📈 Grafik", callback_data: "grafik" },
       ],
       [
+        { text: "💰 Total", callback_data: "total" },
         { text: "📄 Export CSV", callback_data: "export" },
+      ],
+      [
+        { text: "🔍 Cari", callback_data: "cari" },
         { text: "📆 Hari ini", callback_data: "hari" },
       ],
       [BACK_BTN],
@@ -999,6 +1155,18 @@ async function sendMessage(env, chatId, text, extra) {
     headers: { "content-type": "application/json" },
     body: JSON.stringify(payload),
   });
+}
+
+async function sendPhoto(env, chatId, photoUrl, caption, extra) {
+  if (!env.BOT_TOKEN) throw new Error("BOT_TOKEN belum diset");
+  const payload = { chat_id: chatId, photo: photoUrl, caption, ...(extra || {}) };
+  const r = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/sendPhoto`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  // Kalau gagal kirim gambar (mis. URL terlalu panjang), beri tahu.
+  if (!r.ok) await sendMessage(env, chatId, "Gagal membuat grafik. Coba lagi nanti.", extra);
 }
 
 async function sendDocument(env, chatId, content, filename, caption) {
