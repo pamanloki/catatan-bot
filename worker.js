@@ -117,12 +117,12 @@ async function routeMessage(env, chatId, msg) {
 // ---------------------------------------------------------------------------
 
 const RECEIPT_PROMPT =
-  "Ini foto struk belanja Indonesia. Baca dengan teliti. " +
-  "Ambil TOTAL akhir yang benar-benar dibayar — cari baris berlabel " +
-  "TOTAL, GRAND TOTAL, TOTAL BAYAR, TOTAL BELANJA, atau TUNAI/BAYAR. " +
-  "Jangan tertukar dengan subtotal, kembalian, atau pajak. " +
-  "Kalau ada baris 'Netto' atau 'Total', pakai nilai itu. " +
-  "Ambil juga nama toko/merchant (biasanya di bagian paling atas struk). " +
+  "Ini foto bukti pengeluaran dari Indonesia. Bisa berupa: struk belanja, " +
+  "bukti transfer bank/m-banking, atau pembayaran e-wallet (GoPay, OVO, Dana, ShopeePay, dll). " +
+  "Baca dengan teliti dan ambil JUMLAH UANG yang dibayar/ditransfer: " +
+  "untuk struk cari TOTAL/GRAND TOTAL/NETTO/TUNAI (jangan subtotal/kembalian/pajak); " +
+  "untuk transfer/e-wallet ambil nominal transfer / jumlah bayar. " +
+  "Ambil juga 'toko' = nama toko/merchant, atau nama penerima transfer. " +
   "total = hanya digit tanpa titik/koma (mis. 209875). " +
   "Meski foto agak terpotong/buram, tetap beri tebakan angka terbaikmu; jangan menolak.";
 
@@ -197,19 +197,36 @@ async function readReceiptGemini(env, arrayBuffer) {
       },
     },
   };
+  // Coba beberapa kali kalau Gemini lagi ramai (high demand / 429 / 5xx).
   let status = 0;
   let bodyText = "";
-  try {
-    const r = await fetch(url, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    status = r.status;
-    bodyText = await r.text();
-  } catch (e) {
-    return { amount: 0, toko: "", debug: `Gemini gagal konek: ${e && e.message ? e.message : e}` };
+  let lastErr = "";
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const r = await fetch(url, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      status = r.status;
+      bodyText = await r.text();
+    } catch (e) {
+      lastErr = `Gemini gagal konek: ${e && e.message ? e.message : e}`;
+      await sleep(1200 * attempt);
+      continue;
+    }
+
+    const transient =
+      status === 429 || status >= 500 || /high demand|overloaded|unavailable|try again/i.test(bodyText);
+    if (transient && attempt < 3) {
+      lastErr = `Gemini sibuk (HTTP ${status})`;
+      await sleep(1200 * attempt);
+      continue;
+    }
+    break;
   }
+
+  if (!bodyText) return { amount: 0, toko: "", debug: lastErr || "Gemini tidak merespons" };
 
   let j;
   try {
@@ -676,6 +693,9 @@ function wibParts(ts) {
 }
 function pad(n) {
   return String(n).padStart(2, "0");
+}
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
 }
 function fmtRp(n) {
   if (n == null || !isFinite(n)) return "Rp?";
