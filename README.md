@@ -8,7 +8,9 @@ Bot Telegram untuk mencatat keuangan pribadi, jalan di **Cloudflare Worker**.
 - 📕 **Hutang** (kamu pinjam): `/hutang 100rb budi beli bensin`
 - 📗 **Piutang** (orang pinjam ke kamu): `/piutang 50rb ani`
 - ✅ **Lunasi**: `/lunas` (lihat daftar), `/lunas 2` (lunasi nomor 2)
-- 📊 `/laporan` rekap hari & bulan ini (masuk, keluar, saldo, hutang/piutang)
+- 🎯 **Budget bulanan**: `/budget 3jt` set batas, peringatan otomatis saat mendekati/lewat; tiap catat pengeluaran langsung tampil sisa budget
+- 🏷️ **Kategori otomatis** dari kata kunci (atau paksa dengan `#tag`), lengkap dengan rekap per kategori di laporan
+- 📊 `/laporan` rekap hari & bulan ini (masuk, keluar, saldo, per kategori, hutang/piutang)
 - 💰 `/total` total sepanjang waktu
 - 📄 `/export` unduh **CSV** (buka rapi di Excel / Google Sheets)
 - 🗑️ `/hapus` hapus catatan terakhir

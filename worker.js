@@ -82,6 +82,7 @@ async function routeMessage(env, chatId, msg) {
   if (lower.startsWith("/total")) return sendTotal(env, chatId, uid);
   if (lower.startsWith("/export")) return exportCsv(env, chatId, uid);
   if (lower.startsWith("/hapus")) return deleteLast(env, chatId, uid);
+  if (lower.startsWith("/budget")) return handleBudget(env, chatId, uid, text.slice(7).trim());
   if (lower.startsWith("/lunas")) return handleLunas(env, chatId, uid, text.slice(6).trim());
   if (lower.startsWith("/hutang")) return handleDebt(env, chatId, uid, "hutang", text.slice(7).trim());
   if (lower.startsWith("/piutang")) return handleDebt(env, chatId, uid, "piutang", text.slice(8).trim());
@@ -99,8 +100,15 @@ async function routeMessage(env, chatId, msg) {
   await addEntry(env, uid, { kind: flow.kind, amount: flow.amount, note, category, src: "teks" });
   const label = flow.kind === "masuk" ? "Pemasukan" : "Pengeluaran";
   const icon = flow.kind === "masuk" ? "🟢" : "🔴";
-  const catTag = flow.kind === "keluar" ? ` [${category}]` : "";
-  return sendMessage(env, chatId, `${icon} ${label} tercatat: ${fmtRp(flow.amount)} — ${note}${catTag}`);
+  if (flow.kind === "masuk") {
+    return sendMessage(env, chatId, `${icon} ${label} tercatat: ${fmtRp(flow.amount)} — ${note}`);
+  }
+  const extra = await spendingSummaryLines(env, uid);
+  return sendMessage(
+    env,
+    chatId,
+    [`${icon} ${label} tercatat: ${fmtRp(flow.amount)} — ${note} [${category}]`, ...extra].join("\n"),
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -128,7 +136,12 @@ async function handleReceiptPhoto(env, chatId, msg) {
   const note = result.toko || (msg.caption || "").trim() || "struk";
   const category = categorize(note);
   await addEntry(env, msg.from.id, { kind: "keluar", amount: result.amount, note, category, src: "foto" });
-  return sendMessage(env, chatId, `🔴 Pengeluaran (struk): ${fmtRp(result.amount)} — ${note}`);
+  const extra = await spendingSummaryLines(env, msg.from.id);
+  return sendMessage(
+    env,
+    chatId,
+    [`🔴 Pengeluaran (struk): ${fmtRp(result.amount)} — ${note} [${category}]`, ...extra].join("\n"),
+  );
 }
 
 async function readReceipt(env, arrayBuffer) {
@@ -254,6 +267,17 @@ async function handleLunas(env, chatId, uid, arg) {
 
 function kvKey(uid) {
   return `exp:${uid}`;
+}
+function cfgKey(uid) {
+  return `cfg:${uid}`;
+}
+async function getConfig(env, uid) {
+  if (!env.EXPENSES) throw new Error("KV 'EXPENSES' belum di-bind");
+  const raw = await env.EXPENSES.get(cfgKey(uid));
+  return raw ? JSON.parse(raw) : { budget: 0 };
+}
+async function saveConfig(env, uid, cfg) {
+  await env.EXPENSES.put(cfgKey(uid), JSON.stringify(cfg));
 }
 async function getEntries(env, uid) {
   if (!env.EXPENSES) throw new Error("KV 'EXPENSES' belum di-bind");
@@ -400,6 +424,56 @@ async function deleteLast(env, chatId, uid) {
   return sendMessage(env, chatId, `🗑️ Dihapus: ${last.kind} ${fmtRp(last.amount)} — ${last.note}`);
 }
 
+// /budget         -> lihat budget & pemakaian
+// /budget 3jt     -> set budget bulanan
+// /budget off     -> matikan
+async function handleBudget(env, chatId, uid, arg) {
+  const cfg = await getConfig(env, uid);
+
+  if (!arg) {
+    if (!cfg.budget) return sendMessage(env, chatId, "Belum ada budget. Set dengan: /budget 3jt");
+    const extra = await spendingSummaryLines(env, uid);
+    return sendMessage(env, chatId, [`🎯 Budget bulanan: ${fmtRp(cfg.budget)}`, ...extra].join("\n"));
+  }
+  if (arg.toLowerCase() === "off" || arg === "0") {
+    cfg.budget = 0;
+    await saveConfig(env, uid, cfg);
+    return sendMessage(env, chatId, "🎯 Budget dimatikan.");
+  }
+  const p = parseAmountToken(arg);
+  if (!p) return sendMessage(env, chatId, "Format: /budget 3jt  (atau /budget off)");
+  cfg.budget = p.amount;
+  await saveConfig(env, uid, cfg);
+  return sendMessage(env, chatId, `🎯 Budget bulanan diset: ${fmtRp(p.amount)}`);
+}
+
+// Ringkasan pemakaian bulan ini (+ status budget) untuk ditempel di konfirmasi.
+async function spendingSummaryLines(env, uid) {
+  const [list, cfg] = await Promise.all([getEntries(env, uid), getConfig(env, uid)]);
+  const now = wibParts(Date.now());
+  const monthKey = now.y * 100 + now.m;
+
+  let keluar = 0;
+  for (const e of list) {
+    if (e.kind !== "keluar") continue;
+    const p = wibParts(e.ts);
+    if (p.y * 100 + p.m === monthKey) keluar += e.amount;
+  }
+
+  const lines = [`📅 Pengeluaran bulan ini: ${fmtRp(keluar)}`];
+  if (cfg.budget > 0) {
+    const sisa = cfg.budget - keluar;
+    const persen = Math.round((keluar / cfg.budget) * 100);
+    if (sisa >= 0) {
+      lines.push(`🎯 Budget ${fmtRp(cfg.budget)} — sisa ${fmtRp(sisa)} (${persen}% terpakai)`);
+      if (persen >= 80) lines.push("⚠️ Sudah lewat 80% budget, hati-hati.");
+    } else {
+      lines.push(`🚨 Budget ${fmtRp(cfg.budget)} JEBOL ${fmtRp(-sisa)} (${persen}%)`);
+    }
+  }
+  return lines;
+}
+
 // ---------------------------------------------------------------------------
 // Util
 // ---------------------------------------------------------------------------
@@ -417,6 +491,10 @@ function helpText() {
     "/hutang 100rb budi beli bensin  (kamu pinjam)",
     "/piutang 50rb ani               (orang pinjam ke kamu)",
     "/lunas                          (lihat & lunasi)",
+    "",
+    "Budget:",
+    "/budget 3jt — set batas bulanan (auto-warning)",
+    "/budget — lihat sisa budget",
     "",
     "Laporan & data:",
     "/laporan — rekap hari & bulan ini",
