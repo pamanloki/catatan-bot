@@ -82,7 +82,8 @@ async function routeMessage(env, chatId, msg) {
   if (lower.startsWith("/laporan")) return sendReport(env, chatId, uid);
   if (lower.startsWith("/total")) return sendTotal(env, chatId, uid);
   if (lower.startsWith("/export")) return exportCsv(env, chatId, uid);
-  if (lower.startsWith("/hapus")) return deleteLast(env, chatId, uid);
+  if (lower.startsWith("/hapus")) return handleHapus(env, chatId, uid, text.slice(6).trim());
+  if (lower.startsWith("/hari") || lower.startsWith("/tanggal")) return sendMessage(env, chatId, `📆 Sekarang: ${namaHariTanggal(Date.now())} (WIB)`);
   if (lower.startsWith("/budget")) return handleBudget(env, chatId, uid, text.slice(7).trim());
   if (lower.startsWith("/lunas")) return handleLunas(env, chatId, uid, text.slice(6).trim());
   if (lower.startsWith("/hutang")) return handleDebt(env, chatId, uid, "hutang", text.slice(7).trim());
@@ -456,18 +457,18 @@ async function sendReport(env, chatId, uid) {
     }
   }
 
-  const lines = [`📊 Laporan (${pad(now.d)}/${pad(now.m)}/${now.y})`, ""];
+  const lines = [`📊 Laporan`, `🗓️ ${namaHariTanggal(Date.now())}`, ""];
   lines.push("— Hari ini —");
   lines.push(`🟢 Masuk : ${fmtRp(masukHari)}`);
   lines.push(`🔴 Keluar: ${fmtRp(keluarHari)}`);
   lines.push(`💰 Selisih: ${fmtRp(masukHari - keluarHari)}`);
-  lines.push("", "— Bulan ini —");
+  lines.push("", `— ${namaBulan(now)} —`);
   lines.push(`🟢 Masuk : ${fmtRp(masukBulan)}`);
   lines.push(`🔴 Keluar: ${fmtRp(keluarBulan)}`);
   lines.push(`💰 Saldo : ${fmtRp(masukBulan - keluarBulan)}`);
   const kategoriUrut = Object.entries(perKategori).sort((a, b) => b[1] - a[1]);
   if (kategoriUrut.length) {
-    lines.push("", "— Pengeluaran per kategori (bulan ini) —");
+    lines.push("", `— Pengeluaran per kategori (${namaBulan(now)}) —`);
     for (const [cat, amt] of kategoriUrut) {
       const persen = keluarBulan ? Math.round((amt / keluarBulan) * 100) : 0;
       lines.push(`• ${cat}: ${fmtRp(amt)} (${persen}%)`);
@@ -530,6 +531,33 @@ async function exportCsv(env, chatId, uid) {
 function csvCell(v) {
   const s = String(v == null ? "" : v);
   return /[",\r\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+}
+
+// /hapus       -> hapus catatan terakhir
+// /hapus all   -> hapus SEMUA catatan (setelah konfirmasi)
+async function handleHapus(env, chatId, uid, arg) {
+  const a = arg.toLowerCase();
+  if (a === "all" || a === "semua") return confirmHapusAll(env, chatId, uid);
+  if (a === "all!" || a === "semua!" || a === "ya") return doHapusAll(env, chatId, uid);
+  return deleteLast(env, chatId, uid);
+}
+
+async function confirmHapusAll(env, chatId, uid) {
+  const list = await getEntries(env, uid);
+  if (!list.length) return sendMessage(env, chatId, "Tidak ada catatan untuk dihapus.");
+  return sendMessage(
+    env,
+    chatId,
+    `⚠️ Yakin hapus SEMUA ${list.length} catatan? Ini tidak bisa dibatalkan.\n` +
+      "Backup dulu dengan /export.\n\nKetik *tepat*: /hapus all!  (pakai tanda seru) untuk lanjut.",
+  );
+}
+
+async function doHapusAll(env, chatId, uid) {
+  const list = await getEntries(env, uid);
+  const n = list.length;
+  await saveEntries(env, uid, []);
+  return sendMessage(env, chatId, `🗑️ Semua catatan dihapus (${n} entri).`);
 }
 
 async function deleteLast(env, chatId, uid) {
@@ -616,7 +644,9 @@ function helpText() {
     "/laporan — rekap hari & bulan ini",
     "/total — total sepanjang waktu",
     "/export — unduh CSV",
+    "/hari — tanggal & hari sekarang",
     "/hapus — hapus catatan terakhir",
+    "/hapus all — hapus semua (perlu konfirmasi)",
   ].join("\n");
 }
 
@@ -687,9 +717,26 @@ function parseAmountToken(text) {
   return { amount: Math.round(amount), rest };
 }
 
+const NAMA_BULAN = [
+  "Januari", "Februari", "Maret", "April", "Mei", "Juni",
+  "Juli", "Agustus", "September", "Oktober", "November", "Desember",
+];
+const NAMA_HARI = ["Minggu", "Senin", "Selasa", "Rabu", "Kamis", "Jumat", "Sabtu"];
+
 function wibParts(ts) {
   const d = new Date(ts + WIB_OFFSET_MS);
-  return { y: d.getUTCFullYear(), m: d.getUTCMonth() + 1, d: d.getUTCDate() };
+  return { y: d.getUTCFullYear(), m: d.getUTCMonth() + 1, d: d.getUTCDate(), dow: d.getUTCDay() };
+}
+
+// "Jumat, 20 September 2026"
+function namaHariTanggal(ts) {
+  const p = wibParts(ts);
+  return `${NAMA_HARI[p.dow]}, ${p.d} ${NAMA_BULAN[p.m - 1]} ${p.y}`;
+}
+
+// "September 2026"
+function namaBulan(p) {
+  return `${NAMA_BULAN[p.m - 1]} ${p.y}`;
 }
 function pad(n) {
   return String(n).padStart(2, "0");
