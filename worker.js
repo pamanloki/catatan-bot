@@ -317,6 +317,11 @@ async function routeMessage(env, chatId, msg) {
   if (!text) return sendMessage(env, chatId, "Kirim catatan (mis. '50rb makan') atau foto struk.");
 
   const lower = text.toLowerCase();
+  // Perintah (diawali '/') selalu membatalkan mode/langkah yang sedang menggantung.
+  if (lower.startsWith("/")) {
+    const m = await getMode(env, uid);
+    if (m) await clearMode(env, uid);
+  }
   if (lower === "/start") {
     await sendMessage(env, chatId, helpText());
     return sendMenu(env, chatId);
@@ -421,8 +426,6 @@ async function handleModeInput(env, chatId, uid, mode, text) {
   if (mode === "keluar") return recordFlow(env, chatId, uid, text);
   if (mode === "masuk") return recordFlow(env, chatId, uid, "+" + text.replace(/^\+/, ""));
   if (mode === "mutasi") return recordFlow(env, chatId, uid, "tarik " + text);
-  if (mode === "pindah") return recordFlow(env, chatId, uid, "pindah " + text);
-  if (mode === "setsaldo") return handleDompet(env, chatId, uid, "saldo " + text);
   if (mode === "hutang") return handleDebt(env, chatId, uid, "hutang", text);
   if (mode === "piutang") return handleDebt(env, chatId, uid, "piutang", text);
   if (mode === "cari") return handleCari(env, chatId, uid, text.trim());
