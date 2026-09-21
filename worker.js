@@ -20,6 +20,7 @@
 //   Bindings: KV Namespace -> "EXPENSES" ; Workers AI -> "AI" (cadangan struk)
 
 const WIB_OFFSET_MS = 7 * 60 * 60 * 1000; // Asia/Jakarta (UTC+7)
+const NO_WALLET = "Tanpa dompet"; // penanda transaksi yang tak menyentuh saldo dompet
 const AI_VISION_MODEL = "@cf/meta/llama-3.2-11b-vision-instruct";
 
 export default {
@@ -133,6 +134,8 @@ async function handleCallback(env, cq) {
       await setMode(env, uid, "edit_note:" + data.slice(3));
       return sendMessage(env, chatId, "📝 Ketik keterangan baru:", BACK_MENU);
     }
+    if (data.startsWith("ewp:")) return sendEntryWalletPicker(env, chatId, uid, Number(data.slice(4)));
+    if (data.startsWith("ew:")) { const [, ts, i] = data.split(":"); return setEntryWallet(env, chatId, uid, Number(ts), Number(i)); }
     if (data.startsWith("del:")) return deleteByTs(env, chatId, uid, Number(data.slice(4)));
     if (data === "dorestore") return doRestore(env, chatId, uid);
     if (data === "ai_on") return handleAi(env, chatId, uid, "on");
@@ -225,6 +228,7 @@ async function handleCallback(env, cq) {
     if (data.startsWith("dv:")) return execDebt(env, chatId, uid, Number(data.slice(3)));
     // Verifikasi hasil scan struk.
     if (data.startsWith("rv:")) return execReceipt(env, chatId, uid, data.slice(3));
+    if (data.startsWith("rw:")) { const [, kind, i] = data.split(":"); return execReceiptSave(env, chatId, uid, kind, Number(i)); }
     if (data === "rv_amt") {
       await setMode(env, uid, "rcptamt");
       return sendMessage(env, chatId, "✏️ Ketik nominal yang benar (mis. 50rb):", BACK_MENU);
@@ -606,7 +610,7 @@ async function sendReceiptVerify(env, chatId, uid, result, note) {
   return sendMessage(env, chatId, `🧾 Terbaca: ${fmtRp(result.amount)}${toko}\nMau dicatat sebagai apa?`, kb(rows));
 }
 
-// Simpan hasil scan sesuai jenis yang dipilih di menu verifikasi.
+// Jenis dipilih di menu verifikasi.
 async function execReceipt(env, chatId, uid, kind) {
   const d = await getReceiptDraft(env, uid);
   if (!d) return sendMessage(env, chatId, "Sesi scan kadaluarsa. Kirim ulang foto struknya ya.", BACK_MENU);
@@ -617,22 +621,39 @@ async function execReceipt(env, chatId, uid, kind) {
     await setDebtDraft(env, uid, { kind, amount: d.amount, note });
     return wDebtParty(env, chatId, uid, kind);
   }
-  await clearReceiptDraft(env, uid);
-  if (kind === "masuk") {
-    await addEntry(env, uid, { kind: "masuk", amount: d.amount, note, src: "foto" });
-    return sendMessage(env, chatId, `🟢 Pemasukan (struk): ${fmtRp(d.amount)} — ${note}`, BACK_MENU);
-  }
   if (kind === "mutasi") {
+    await clearReceiptDraft(env, uid);
     const cfg = await getConfig(env, uid);
     const from = bankWallet(cfg), to = cashWallet(cfg);
     await addEntry(env, uid, { kind: "mutasi", amount: d.amount, note: "tarik tunai", from, to, src: "foto" });
     return sendMessage(env, chatId, `💵 Tarik tunai (struk): ${fmtRp(d.amount)} — ${from} → ${to}\n(pindah dompet, bukan pengeluaran)`, BACK_MENU);
   }
-  // default keluar
+  // keluar / masuk -> pilih dompet dulu.
+  const cfg = await getConfig(env, uid);
+  const rows = chunk(cfg.wallets.map((w, i) => ({ text: w, callback_data: `rw:${kind}:${i}` })), 2);
+  rows.push([{ text: "⭐ Default (" + cfg.defaultWallet + ")", callback_data: `rw:${kind}:-1` }]);
+  rows.push([{ text: "🚫 Tanpa dompet (tak ubah saldo)", callback_data: `rw:${kind}:-2` }]);
+  rows.push([BACK_BTN]);
+  const emo = kind === "masuk" ? "🟢 Pemasukan" : "🔴 Pengeluaran";
+  return sendMessage(env, chatId, `${emo} ${fmtRp(d.amount)} — ${note}\nDari/ke dompet mana?`, kb(rows));
+}
+
+// Dompet dipilih -> simpan pemasukan/pengeluaran dari struk.
+async function execReceiptSave(env, chatId, uid, kind, walletIdx) {
+  const d = await getReceiptDraft(env, uid);
+  if (!d) return sendMessage(env, chatId, "Sesi scan kadaluarsa. Kirim ulang foto struknya ya.", BACK_MENU);
+  const cfg = await getConfig(env, uid);
+  const wallet = walletIdx === -2 ? NO_WALLET : (walletIdx < 0 ? cfg.defaultWallet : (cfg.wallets[walletIdx] || cfg.defaultWallet));
+  const note = d.note || d.toko || "struk";
+  await clearReceiptDraft(env, uid);
+  if (kind === "masuk") {
+    await addEntry(env, uid, { kind: "masuk", amount: d.amount, note, wallet, src: "foto" });
+    return sendMessage(env, chatId, `🟢 Pemasukan (struk): ${fmtRp(d.amount)} — ${note} (${wallet})`, BACK_MENU);
+  }
   const category = categorize(note);
-  await addEntry(env, uid, { kind: "keluar", amount: d.amount, note, category, src: "foto" });
+  await addEntry(env, uid, { kind: "keluar", amount: d.amount, note, category, wallet, src: "foto" });
   const extra = await spendingSummaryLines(env, uid);
-  return sendMessage(env, chatId, [`🔴 Pengeluaran (struk): ${fmtRp(d.amount)} — ${note} [${category}]`, ...extra].join("\n"), BACK_MENU);
+  return sendMessage(env, chatId, [`🔴 Pengeluaran (struk): ${fmtRp(d.amount)} — ${note} [${category}] (${wallet})`, ...extra].join("\n"), BACK_MENU);
 }
 function receiptDraftKey(uid) { return `rcpt:${uid}`; }
 async function setReceiptDraft(env, uid, d) { await env.EXPENSES.put(receiptDraftKey(uid), JSON.stringify(d), { expirationTtl: 900 }); }
@@ -1018,7 +1039,7 @@ function walletBalances(list, cfg) {
   const bal = {};
   for (const w of cfg.wallets) bal[w] = 0;
   const add = (w, n) => {
-    if (!w) return;
+    if (!w || w === NO_WALLET) return; // "tanpa dompet" tak mempengaruhi saldo
     bal[w] = (bal[w] || 0) + n;
   };
   for (const e of list) {
@@ -1989,16 +2010,38 @@ async function sendEditOptions(env, chatId, uid, ts) {
   const list = await getEntries(env, uid);
   const e = list.find((x) => x.ts === ts);
   if (!e) return sendMessage(env, chatId, "Catatan tidak ditemukan (mungkin sudah dihapus).", BACK_MENU);
-  const info = `${entryIcon(e)} ${fmtRp(e.amount)} — ${e.note}${e.party ? " / " + e.party : ""}\n🗓️ ${tglPendek(e.ts)} · ${jamPendek(e.ts)}`;
+  const wlt = e.wallet ? ` (${e.wallet})` : "";
+  const info = `${entryIcon(e)} ${fmtRp(e.amount)} — ${e.note}${e.party ? " / " + e.party : ""}${wlt}\n🗓️ ${tglPendek(e.ts)} · ${jamPendek(e.ts)}`;
   const rows = [
     [
       { text: "✏️ Nominal", callback_data: `ea:${ts}` },
       { text: "📝 Keterangan", callback_data: `en:${ts}` },
     ],
-    [{ text: "🗑️ Hapus", callback_data: `del:${ts}` }],
-    [{ text: "🔙 Daftar", callback_data: "edit" }, BACK_BTN],
   ];
+  if (e.kind === "keluar" || e.kind === "masuk") rows.push([{ text: "👛 Dompet", callback_data: `ewp:${ts}` }]);
+  rows.push([{ text: "🗑️ Hapus", callback_data: `del:${ts}` }]);
+  rows.push([{ text: "🔙 Daftar", callback_data: "edit" }, BACK_BTN]);
   return sendMessage(env, chatId, `Edit:\n${info}`, { reply_markup: { inline_keyboard: rows } });
+}
+
+// Pilih dompet untuk sebuah catatan (termasuk "Tanpa dompet").
+async function sendEntryWalletPicker(env, chatId, uid, ts) {
+  const cfg = await getConfig(env, uid);
+  const rows = chunk(cfg.wallets.map((w, i) => ({ text: w, callback_data: `ew:${ts}:${i}` })), 2);
+  rows.push([{ text: "⭐ Default (" + cfg.defaultWallet + ")", callback_data: `ew:${ts}:-1` }]);
+  rows.push([{ text: "🚫 Tanpa dompet (tak ubah saldo)", callback_data: `ew:${ts}:-2` }]);
+  rows.push([{ text: "🔙 Batal", callback_data: `edit:${ts}` }]);
+  return sendMessage(env, chatId, "👛 Catat pakai dompet mana?", kb(rows));
+}
+async function setEntryWallet(env, chatId, uid, ts, walletIdx) {
+  const cfg = await getConfig(env, uid);
+  const wallet = walletIdx === -2 ? NO_WALLET : (walletIdx < 0 ? cfg.defaultWallet : (cfg.wallets[walletIdx] || cfg.defaultWallet));
+  const list = await getEntries(env, uid);
+  const idx = list.findIndex((x) => x.ts === ts);
+  if (idx === -1) return sendMessage(env, chatId, "Catatan tidak ditemukan.", BACK_MENU);
+  list[idx].wallet = wallet;
+  await saveEntries(env, uid, list);
+  return sendEditOptions(env, chatId, uid, ts);
 }
 
 // Ubah satu field (amount / note) sebuah catatan.
