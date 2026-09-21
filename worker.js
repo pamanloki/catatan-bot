@@ -2808,6 +2808,16 @@ function pad(n) {
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
+// fetch dengan batas waktu (Workers tak punya opsi timeout bawaan).
+async function fetchWithTimeout(url, opts, ms) {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), ms);
+  try {
+    return await fetch(url, { ...(opts || {}), signal: ctrl.signal });
+  } finally {
+    clearTimeout(t);
+  }
+}
 function fmtRp(n) {
   if (n == null || !isFinite(n)) return "Rp?";
   const neg = n < 0;
