@@ -229,6 +229,8 @@ async function handleCallback(env, cq) {
     // Verifikasi hasil scan struk.
     if (data.startsWith("rv:")) return execReceipt(env, chatId, uid, data.slice(3));
     if (data.startsWith("rw:")) { const [, kind, i] = data.split(":"); return execReceiptSave(env, chatId, uid, kind, Number(i)); }
+    // Pilih dompet untuk input preset (keluar/masuk).
+    if (data.startsWith("cw:")) return execCatat(env, chatId, uid, Number(data.slice(3)));
     if (data === "rv_amt") {
       await setMode(env, uid, "rcptamt");
       return sendMessage(env, chatId, "✏️ Ketik nominal yang benar (mis. 50rb):", BACK_MENU);
@@ -431,8 +433,9 @@ async function handleModeInput(env, chatId, uid, mode, text) {
     const sep = rest.indexOf(":");
     const kind = rest.slice(0, sep);
     const note = rest.slice(sep + 1);
-    const prefix = kind === "masuk" ? "+" : "";
-    return recordFlow(env, chatId, uid, `${prefix}${text.trim()} ${note}`);
+    const p = parseAmountToken(text);
+    if (!p) return sendMessage(env, chatId, "Nominal tak terbaca. Contoh: 25rb", BACK_MENU);
+    return sendCatatWalletPicker(env, chatId, uid, kind, p.amount, note);
   }
   if (mode.startsWith("padd:")) {
     const kind = mode.slice(5);
@@ -659,6 +662,37 @@ function receiptDraftKey(uid) { return `rcpt:${uid}`; }
 async function setReceiptDraft(env, uid, d) { await env.EXPENSES.put(receiptDraftKey(uid), JSON.stringify(d), { expirationTtl: 900 }); }
 async function getReceiptDraft(env, uid) { const r = await env.EXPENSES.get(receiptDraftKey(uid)); return r ? JSON.parse(r) : null; }
 async function clearReceiptDraft(env, uid) { await env.EXPENSES.delete(receiptDraftKey(uid)); }
+
+// Input preset (keluar/masuk): pilih dompet sebelum simpan.
+async function sendCatatWalletPicker(env, chatId, uid, kind, amount, note) {
+  await setCatatDraft(env, uid, { kind, amount, note });
+  const cfg = await getConfig(env, uid);
+  const rows = chunk(cfg.wallets.map((w, i) => ({ text: w, callback_data: `cw:${i}` })), 2);
+  rows.push([{ text: "⭐ Default (" + cfg.defaultWallet + ")", callback_data: "cw:-1" }]);
+  rows.push([{ text: "🚫 Tanpa dompet (tak ubah saldo)", callback_data: "cw:-2" }]);
+  rows.push([BACK_BTN]);
+  const emo = kind === "masuk" ? "🟢 Pemasukan" : "🔴 Pengeluaran";
+  return sendMessage(env, chatId, `${emo} ${fmtRp(amount)} — ${note}\nPakai dompet mana?`, kb(rows));
+}
+async function execCatat(env, chatId, uid, walletIdx) {
+  const d = await getCatatDraft(env, uid);
+  if (!d) return sendMessage(env, chatId, "Sesi kadaluarsa, ulangi dari menu.", BACK_MENU);
+  const cfg = await getConfig(env, uid);
+  const wallet = walletIdx === -2 ? NO_WALLET : (walletIdx < 0 ? cfg.defaultWallet : (cfg.wallets[walletIdx] || cfg.defaultWallet));
+  await clearCatatDraft(env, uid);
+  if (d.kind === "masuk") {
+    await addEntry(env, uid, { kind: "masuk", amount: d.amount, note: d.note, wallet, src: "tombol" });
+    return sendMessage(env, chatId, `🟢 Pemasukan: ${fmtRp(d.amount)} — ${d.note} (${wallet})`, BACK_MENU);
+  }
+  const r = resolveCategory(d.note);
+  await addEntry(env, uid, { kind: "keluar", amount: d.amount, note: r.note, category: r.category, wallet, src: "tombol" });
+  const extra = await spendingSummaryLines(env, uid);
+  return sendMessage(env, chatId, [`🔴 Pengeluaran: ${fmtRp(d.amount)} — ${r.note} [${r.category}] (${wallet})`, ...extra].join("\n"), BACK_MENU);
+}
+function catatDraftKey(uid) { return `cdraft:${uid}`; }
+async function setCatatDraft(env, uid, d) { await env.EXPENSES.put(catatDraftKey(uid), JSON.stringify(d), { expirationTtl: 900 }); }
+async function getCatatDraft(env, uid) { const r = await env.EXPENSES.get(catatDraftKey(uid)); return r ? JSON.parse(r) : null; }
+async function clearCatatDraft(env, uid) { await env.EXPENSES.delete(catatDraftKey(uid)); }
 
 // Pilih mesin OCR: Gemini (akurat) kalau key ada & diizinkan, jika tidak Workers AI.
 async function readReceipt(env, arrayBuffer, useGemini = true) {
