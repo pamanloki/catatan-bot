@@ -209,7 +209,7 @@ async function handleCallback(env, cq) {
       const parties = recentParties(await getEntries(env, uid), kind);
       const party = parties[Number(i)];
       if (!party) return sendMessage(env, chatId, "Nama tak ada, coba lagi.", BACK_MENU);
-      return wDebtNominal(env, chatId, uid, kind, party);
+      return debtPickedParty(env, chatId, uid, kind, party);
     }
     if (data.startsWith("dpnew:")) {
       const kind = data.slice(6);
@@ -223,6 +223,12 @@ async function handleCallback(env, cq) {
       return sendMessage(env, chatId, `✏️ Ketik lengkap: nominal nama [ket] [tgl]\ncontoh: 100rb budi bensin tgl 15-3-2025`, BACK_MENU);
     }
     if (data.startsWith("dv:")) return execDebt(env, chatId, uid, Number(data.slice(3)));
+    // Verifikasi hasil scan struk.
+    if (data.startsWith("rv:")) return execReceipt(env, chatId, uid, data.slice(3));
+    if (data === "rv_amt") {
+      await setMode(env, uid, "rcptamt");
+      return sendMessage(env, chatId, "✏️ Ketik nominal yang benar (mis. 50rb):", BACK_MENU);
+    }
 
     // Kembali ke menu/kategori -> bersihkan mode nyangkut biar ketikan berikutnya tak salah tafsir.
     if (data === "menu" || data.startsWith("cat_")) await clearMode(env, uid);
@@ -276,8 +282,8 @@ async function handleCallback(env, cq) {
         return sendMessage(env, chatId, "➕ Ketik nama dompet baru (mis. GoPay):", BACK_MENU);
       case "dw_delp": return sendWalletPicker(env, chatId, uid, "🗑️ Hapus dompet mana?", "dw_del");
       case "dw_mainp": return sendWalletPicker(env, chatId, uid, "⭐ Jadikan dompet utama:", "dw_main");
-      case "add_hutang": return wDebtParty(env, chatId, uid, "hutang");
-      case "add_piutang": return wDebtParty(env, chatId, uid, "piutang");
+      case "add_hutang": await clearDebtDraft(env, uid); return wDebtParty(env, chatId, uid, "hutang");
+      case "add_piutang": await clearDebtDraft(env, uid); return wDebtParty(env, chatId, uid, "piutang");
     }
   } catch (e) {
     return sendMessage(env, chatId, "Error: " + (e && e.message ? e.message : e));
@@ -433,7 +439,15 @@ async function handleModeInput(env, chatId, uid, mode, text) {
   if (mode.startsWith("debtname:")) {
     const kind = mode.slice(9);
     const party = text.trim().slice(0, 30) || "-";
-    return wDebtNominal(env, chatId, uid, kind, party);
+    return debtPickedParty(env, chatId, uid, kind, party);
+  }
+  if (mode === "rcptamt") {
+    const p = parseAmountToken(text);
+    if (!p) return sendMessage(env, chatId, "Nominal tak terbaca. Contoh: 50rb", BACK_MENU);
+    const d = await getReceiptDraft(env, uid);
+    if (!d) return sendMessage(env, chatId, "Sesi scan kadaluarsa. Kirim ulang fotonya.", BACK_MENU);
+    d.amount = p.amount;
+    return sendReceiptVerify(env, chatId, uid, { amount: d.amount, toko: d.toko }, d.note);
   }
   if (mode === "debtamt") {
     const p = parseAmountToken(text);
@@ -503,6 +517,9 @@ async function handleReceiptPhoto(env, chatId, msg, mode) {
   // Tentukan jenis dari caption foto atau mode tombol yang aktif.
   const cls = classifyPhoto(msg.caption || "", mode);
 
+  // Tanpa petunjuk jenis -> tampilkan menu verifikasi dulu.
+  if (!cls.explicit) return sendReceiptVerify(env, chatId, uid, result, cls.note);
+
   if (cls.kind === "hutang" || cls.kind === "piutang") {
     const party = cls.party || "-";
     const note = cls.note || result.toko || "struk";
@@ -557,23 +574,70 @@ function classifyPhoto(caption, mode) {
   if (m) {
     const parts = m[2].split(/\s+/).filter(Boolean);
     const party = parts.shift() || "";
-    return { kind: m[1].toLowerCase(), party, note: parts.join(" ") };
+    return { kind: m[1].toLowerCase(), party, note: parts.join(" "), explicit: true };
   }
   if (/^(tarik\s*tunai|tarik|tunai)\b/i.test(cap)) {
-    return { kind: "mutasi", note: cap.replace(/^(tarik\s*tunai|tarik|tunai)\s*/i, "") };
+    return { kind: "mutasi", note: cap.replace(/^(tarik\s*tunai|tarik|tunai)\s*/i, ""), explicit: true };
   }
   if (/^(masuk|pemasukan|\+)/i.test(cap)) {
-    return { kind: "masuk", note: cap.replace(/^(masuk|pemasukan|\+)\s*/i, "") };
+    return { kind: "masuk", note: cap.replace(/^(masuk|pemasukan|\+)\s*/i, ""), explicit: true };
   }
-  if (mode === "mutasi") return { kind: "mutasi", note: cap };
+  if (mode === "mutasi") return { kind: "mutasi", note: cap, explicit: true };
   if (mode === "hutang" || mode === "piutang") {
     const parts = cap.split(/\s+/).filter(Boolean);
     const party = parts.shift() || "";
-    return { kind: mode, party, note: parts.join(" ") };
+    return { kind: mode, party, note: parts.join(" "), explicit: true };
   }
-  if (mode === "masuk") return { kind: "masuk", note: cap };
-  return { kind: "keluar", note: cap };
+  if (mode === "masuk") return { kind: "masuk", note: cap, explicit: true };
+  // Tanpa caption/mode jelas: keterangan = caption bebas (kalau ada), belum pasti jenisnya.
+  return { kind: "keluar", note: cap, explicit: false };
 }
+
+// Menu verifikasi setelah scan struk: pilih jenis catatannya.
+async function sendReceiptVerify(env, chatId, uid, result, note) {
+  await setReceiptDraft(env, uid, { amount: result.amount, toko: result.toko || "", note: note || "" });
+  const rows = [
+    [{ text: "🔴 Pengeluaran", callback_data: "rv:keluar" }, { text: "🟢 Pemasukan", callback_data: "rv:masuk" }],
+    [{ text: "📕 Hutang", callback_data: "rv:hutang" }, { text: "📗 Piutang", callback_data: "rv:piutang" }],
+    [{ text: "💵 Tarik tunai", callback_data: "rv:mutasi" }],
+    [{ text: "✏️ Ubah nominal", callback_data: "rv_amt" }, { text: "❌ Batal", callback_data: "menu" }],
+  ];
+  const toko = result.toko ? ` — ${result.toko}` : "";
+  return sendMessage(env, chatId, `🧾 Terbaca: ${fmtRp(result.amount)}${toko}\nMau dicatat sebagai apa?`, kb(rows));
+}
+
+// Simpan hasil scan sesuai jenis yang dipilih di menu verifikasi.
+async function execReceipt(env, chatId, uid, kind) {
+  const d = await getReceiptDraft(env, uid);
+  if (!d) return sendMessage(env, chatId, "Sesi scan kadaluarsa. Kirim ulang foto struknya ya.", BACK_MENU);
+  const note = d.note || d.toko || "struk";
+  if (kind === "hutang" || kind === "piutang") {
+    // Nominal sudah ada dari struk; tinggal pilih nama.
+    await clearReceiptDraft(env, uid);
+    await setDebtDraft(env, uid, { kind, amount: d.amount, note });
+    return wDebtParty(env, chatId, uid, kind);
+  }
+  await clearReceiptDraft(env, uid);
+  if (kind === "masuk") {
+    await addEntry(env, uid, { kind: "masuk", amount: d.amount, note, src: "foto" });
+    return sendMessage(env, chatId, `🟢 Pemasukan (struk): ${fmtRp(d.amount)} — ${note}`, BACK_MENU);
+  }
+  if (kind === "mutasi") {
+    const cfg = await getConfig(env, uid);
+    const from = bankWallet(cfg), to = cashWallet(cfg);
+    await addEntry(env, uid, { kind: "mutasi", amount: d.amount, note: "tarik tunai", from, to, src: "foto" });
+    return sendMessage(env, chatId, `💵 Tarik tunai (struk): ${fmtRp(d.amount)} — ${from} → ${to}\n(pindah dompet, bukan pengeluaran)`, BACK_MENU);
+  }
+  // default keluar
+  const category = categorize(note);
+  await addEntry(env, uid, { kind: "keluar", amount: d.amount, note, category, src: "foto" });
+  const extra = await spendingSummaryLines(env, uid);
+  return sendMessage(env, chatId, [`🔴 Pengeluaran (struk): ${fmtRp(d.amount)} — ${note} [${category}]`, ...extra].join("\n"), BACK_MENU);
+}
+function receiptDraftKey(uid) { return `rcpt:${uid}`; }
+async function setReceiptDraft(env, uid, d) { await env.EXPENSES.put(receiptDraftKey(uid), JSON.stringify(d), { expirationTtl: 900 }); }
+async function getReceiptDraft(env, uid) { const r = await env.EXPENSES.get(receiptDraftKey(uid)); return r ? JSON.parse(r) : null; }
+async function clearReceiptDraft(env, uid) { await env.EXPENSES.delete(receiptDraftKey(uid)); }
 
 // Pilih mesin OCR: Gemini (akurat) kalau key ada & diizinkan, jika tidak Workers AI.
 async function readReceipt(env, arrayBuffer, useGemini = true) {
@@ -2441,6 +2505,22 @@ async function wDebtParty(env, chatId, uid, kind) {
   rows.push([BACK_BTN]);
   const head = kind === "hutang" ? "📕 Hutang — kamu pinjam ke siapa?" : "📗 Piutang — siapa yang pinjam ke kamu?";
   return sendMessage(env, chatId, head, kb(rows));
+}
+// Nama dipilih. Kalau nominal sudah ada (dari struk) -> langsung simpan.
+// Kalau belum -> lanjut pilih nominal.
+async function debtPickedParty(env, chatId, uid, kind, party) {
+  const d = await getDebtDraft(env, uid);
+  if (d && d.amount != null) {
+    await clearDebtDraft(env, uid);
+    const ts = Date.now();
+    const note = d.note || "(tanpa keterangan)";
+    await addEntry(env, uid, { kind, amount: d.amount, note, party, status: "belum", ts, src: "foto" });
+    const label = kind === "hutang"
+      ? `📕 Hutang dicatat: kamu pinjam ${fmtRp(d.amount)} ke ${party}`
+      : `📗 Piutang dicatat: ${party} pinjam ${fmtRp(d.amount)} ke kamu`;
+    return sendMessage(env, chatId, `${label} (${note})\n🗓️ ${namaHariTanggal(ts)} · ${jamPendek(ts)}`, BACK_MENU);
+  }
+  return wDebtNominal(env, chatId, uid, kind, party);
 }
 async function wDebtNominal(env, chatId, uid, kind, party) {
   await setDebtDraft(env, uid, { kind, party });
