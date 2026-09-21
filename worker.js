@@ -203,6 +203,26 @@ async function handleCallback(env, cq) {
       await saveConfig(env, uid, cfg);
       return sendPresetManage(env, chatId, uid, kind);
     }
+    // Hutang/piutang berbasis tombol: pilih nama -> pilih nominal.
+    if (data.startsWith("dp:")) {
+      const [, kind, i] = data.split(":");
+      const parties = recentParties(await getEntries(env, uid), kind);
+      const party = parties[Number(i)];
+      if (!party) return sendMessage(env, chatId, "Nama tak ada, coba lagi.", BACK_MENU);
+      return wDebtNominal(env, chatId, uid, kind, party);
+    }
+    if (data.startsWith("dpnew:")) {
+      const kind = data.slice(6);
+      await setMode(env, uid, `debtname:${kind}`);
+      const sisi = kind === "hutang" ? "kamu pinjam ke siapa" : "siapa yang pinjam ke kamu";
+      return sendMessage(env, chatId, `✍️ Ketik nama (${sisi}):`, BACK_MENU);
+    }
+    if (data.startsWith("dpfull:")) {
+      const kind = data.slice(7);
+      await setMode(env, uid, kind);
+      return sendMessage(env, chatId, `✏️ Ketik lengkap: nominal nama [ket] [tgl]\ncontoh: 100rb budi bensin tgl 15-3-2025`, BACK_MENU);
+    }
+    if (data.startsWith("dv:")) return execDebt(env, chatId, uid, Number(data.slice(3)));
 
     // Kembali ke menu/kategori -> bersihkan mode nyangkut biar ketikan berikutnya tak salah tafsir.
     if (data === "menu" || data.startsWith("cat_")) await clearMode(env, uid);
@@ -256,12 +276,8 @@ async function handleCallback(env, cq) {
         return sendMessage(env, chatId, "➕ Ketik nama dompet baru (mis. GoPay):", BACK_MENU);
       case "dw_delp": return sendWalletPicker(env, chatId, uid, "🗑️ Hapus dompet mana?", "dw_del");
       case "dw_mainp": return sendWalletPicker(env, chatId, uid, "⭐ Jadikan dompet utama:", "dw_main");
-      case "add_hutang":
-        await setMode(env, uid, "hutang");
-        return sendMessage(env, chatId, "📕 Ketik: nominal nama [ket] [tgl]\ncontoh: 100rb budi bensin tgl 15-3-2025", BACK_MENU);
-      case "add_piutang":
-        await setMode(env, uid, "piutang");
-        return sendMessage(env, chatId, "📗 Ketik: nominal nama [ket] [tgl]\ncontoh: 50rb ani tgl 15-3-2025", BACK_MENU);
+      case "add_hutang": return wDebtParty(env, chatId, uid, "hutang");
+      case "add_piutang": return wDebtParty(env, chatId, uid, "piutang");
     }
   } catch (e) {
     return sendMessage(env, chatId, "Error: " + (e && e.message ? e.message : e));
@@ -413,6 +429,16 @@ async function handleModeInput(env, chatId, uid, mode, text) {
     await addPreset(env, uid, kind, text);
     await sendMessage(env, chatId, `✅ Preset "${text.trim()}" ditambah.`);
     return sendCatatPicker(env, chatId, uid, kind);
+  }
+  if (mode.startsWith("debtname:")) {
+    const kind = mode.slice(9);
+    const party = text.trim().slice(0, 30) || "-";
+    return wDebtNominal(env, chatId, uid, kind, party);
+  }
+  if (mode === "debtamt") {
+    const p = parseAmountToken(text);
+    if (!p) return sendMessage(env, chatId, "Nominal tak terbaca. Contoh: 100rb", BACK_MENU);
+    return execDebt(env, chatId, uid, p.amount);
   }
   // Pindah ketik-nominal: mode "pindahamt:<i>:<j>"
   if (mode.startsWith("pindahamt:")) {
@@ -2391,6 +2417,50 @@ async function execPindah(env, chatId, uid, i, j, amount) {
   await addEntry(env, uid, { kind: "mutasi", amount, note: `pindah ${from}→${to}`, from, to, ts: Date.now(), src: "tombol" });
   return sendMessage(env, chatId, `✅ ${fmtRp(amount)} — ${from} → ${to}\n(pindah dompet, bukan pengeluaran)`, BACK_MENU);
 }
+
+// --- Hutang / Piutang berbasis tombol ---
+const DEBT_PRESET = [["20rb", 20000], ["50rb", 50000], ["100rb", 100000], ["200rb", 200000], ["500rb", 500000], ["1jt", 1000000]];
+
+// Nama orang unik dari catatan hutang/piutang, terbaru dulu (maks 8).
+function recentParties(list, kind) {
+  const seen = new Set();
+  const out = [];
+  for (const e of list.filter((x) => x.kind === kind && x.party).sort((a, b) => b.ts - a.ts)) {
+    const key = e.party.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(e.party);
+    if (out.length >= 8) break;
+  }
+  return out;
+}
+async function wDebtParty(env, chatId, uid, kind) {
+  const parties = recentParties(await getEntries(env, uid), kind);
+  const rows = chunk(parties.map((p, i) => ({ text: "👤 " + p, callback_data: `dp:${kind}:${i}` })), 2);
+  rows.push([{ text: "✍️ Nama baru", callback_data: `dpnew:${kind}` }, { text: "✏️ Ketik lengkap", callback_data: `dpfull:${kind}` }]);
+  rows.push([BACK_BTN]);
+  const head = kind === "hutang" ? "📕 Hutang — kamu pinjam ke siapa?" : "📗 Piutang — siapa yang pinjam ke kamu?";
+  return sendMessage(env, chatId, head, kb(rows));
+}
+async function wDebtNominal(env, chatId, uid, kind, party) {
+  await setDebtDraft(env, uid, { kind, party });
+  return sendNominalPicker(env, chatId, `${kind === "hutang" ? "📕" : "📗"} ${party} — nominal berapa?`, "dv", DEBT_PRESET, "debtamt");
+}
+async function execDebt(env, chatId, uid, amount) {
+  const d = await getDebtDraft(env, uid);
+  if (!d) return sendMessage(env, chatId, "Sesi kadaluarsa. Mulai lagi dari menu.", BACK_MENU);
+  await clearDebtDraft(env, uid);
+  const ts = Date.now();
+  await addEntry(env, uid, { kind: d.kind, amount, note: "(tanpa keterangan)", party: d.party, status: "belum", ts, src: "tombol" });
+  const label = d.kind === "hutang"
+    ? `📕 Hutang dicatat: kamu pinjam ${fmtRp(amount)} ke ${d.party}`
+    : `📗 Piutang dicatat: ${d.party} pinjam ${fmtRp(amount)} ke kamu`;
+  return sendMessage(env, chatId, `${label}\n🗓️ ${namaHariTanggal(ts)} · ${jamPendek(ts)}`, BACK_MENU);
+}
+function debtDraftKey(uid) { return `ddraft:${uid}`; }
+async function setDebtDraft(env, uid, d) { await env.EXPENSES.put(debtDraftKey(uid), JSON.stringify(d), { expirationTtl: 900 }); }
+async function getDebtDraft(env, uid) { const r = await env.EXPENSES.get(debtDraftKey(uid)); return r ? JSON.parse(r) : null; }
+async function clearDebtDraft(env, uid) { await env.EXPENSES.delete(debtDraftKey(uid)); }
 
 // --- Set saldo awal ---
 async function wSetSaldoWallet(env, chatId, uid) {
