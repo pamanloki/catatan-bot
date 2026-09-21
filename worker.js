@@ -146,6 +146,30 @@ async function handleCallback(env, cq) {
     if (data === "del_all_yes") return doHapusAll(env, chatId, uid, BACK_MENU);
     if (data === "impor") return handleImportStart(env, chatId, uid);
     if (data === "doimport") return doImport(env, chatId, uid);
+
+    // --- Alur berbasis tombol (biar minim ngetik) ---
+    // Pindah antar dompet: dari -> ke -> nominal
+    if (data.startsWith("pf:")) return wPindahTo(env, chatId, uid, Number(data.slice(3)));
+    if (data.startsWith("pt:")) { const [, i, j] = data.split(":"); return wPindahNominal(env, chatId, uid, Number(i), Number(j)); }
+    if (data.startsWith("pv:")) { const [, i, j, amt] = data.split(":"); return execPindah(env, chatId, uid, Number(i), Number(j), Number(amt)); }
+    // Set saldo: dompet -> nominal
+    if (data.startsWith("ssw:")) return wSetSaldoNominal(env, chatId, uid, Number(data.slice(4)));
+    if (data.startsWith("ssv:")) { const [, i, amt] = data.split(":"); return execSetSaldo(env, chatId, uid, Number(i), Number(amt)); }
+    // Tarik tunai nominal
+    if (data.startsWith("mv:")) return recordFlow(env, chatId, uid, "tarik " + Number(data.slice(3)));
+    // Budget
+    if (data.startsWith("bgv:")) return handleBudget(env, chatId, uid, String(Number(data.slice(4))), BACK_MENU);
+    // Dompet kelola
+    if (data.startsWith("dw_del:")) return dompetByIndex(env, chatId, uid, "hapus", Number(data.slice(7)));
+    if (data.startsWith("dw_main:")) return dompetByIndex(env, chatId, uid, "utama", Number(data.slice(8)));
+    // Laporan bulan tertentu
+    if (data.startsWith("lap:")) return sendReport(env, chatId, uid, BACK_MENU, data.slice(4));
+    // Pilih "✏️ Ketik nominal" pada picker -> set mode lalu minta ketik.
+    if (data.startsWith("typeamt:")) {
+      await setMode(env, uid, data.slice(8));
+      return sendMessage(env, chatId, "✏️ Ketik nominal (mis. 75rb):", BACK_MENU);
+    }
+
     switch (data) {
       case "menu": return sendMenu(env, chatId);
       // Submenu kategori
@@ -156,15 +180,19 @@ async function handleCallback(env, cq) {
       case "cat_dompet": return sendMessage(env, chatId, "👛 Dompet:", MENU_DOMPET);
       case "cat_lain": return sendMessage(env, chatId, "🧰 Lainnya:", MENU_LAIN);
       case "saldo": return sendSaldo(env, chatId, uid, BACK_MENU);
-      case "dompet": return handleDompet(env, chatId, uid, "");
+      case "dompet": return sendDompetMenu(env, chatId, uid);
       // Aksi (hasil selalu ada tombol balik)
       case "laporan": return sendReport(env, chatId, uid, BACK_MENU);
+      case "lap_pick": return sendMonthPicker(env, chatId, uid);
       case "grafik": return sendChart(env, chatId, uid, BACK_MENU);
       case "cari":
-        return sendMessage(env, chatId, "Ketik: /cari <kata>\nContoh: /cari grab", BACK_MENU);
+        await setMode(env, uid, "cari");
+        return sendMessage(env, chatId, "🔍 Ketik kata yang dicari (mis. grab):", BACK_MENU);
       case "utang": return sendDebtReport(env, chatId, uid, BACK_MENU);
       case "total": return sendTotal(env, chatId, uid, BACK_MENU);
       case "budget": return handleBudget(env, chatId, uid, "", BACK_MENU);
+      case "budget_set": return sendNominalPicker(env, chatId, "🎯 Set budget bulanan:", "bgv", BIG_PRESET, "budget");
+      case "budget_off": return handleBudget(env, chatId, uid, "off", BACK_MENU);
       case "lunas": return handleLunas(env, chatId, uid, "", BACK_MENU);
       case "export": return exportCsv(env, chatId, uid, BACK_MENU);
       case "excel": return exportExcel(env, chatId, uid, BACK_MENU);
@@ -183,14 +211,16 @@ async function handleCallback(env, cq) {
         await setMode(env, uid, "masuk");
         return sendMessage(env, chatId, "🟢 Ketik pemasukan (langsung):\ncontoh: 5jt gaji", BACK_MENU);
       case "add_mutasi":
-        await setMode(env, uid, "mutasi");
-        return sendMessage(env, chatId, "💵 Ketik jumlah tarik tunai:\ncontoh: 500rb\n(pindah Bank → Cash, bukan pengeluaran)", BACK_MENU);
+        return sendNominalPicker(env, chatId, "💵 Tarik tunai berapa? (Bank → Cash)", "mv", CASH_PRESET, "mutasi");
       case "add_pindah":
-        await setMode(env, uid, "pindah");
-        return sendMessage(env, chatId, "🔁 Ketik: jumlah dari ke\ncontoh: 200rb bank gopay", BACK_MENU);
+        return wPindahFrom(env, chatId, uid);
       case "add_setsaldo":
-        await setMode(env, uid, "setsaldo");
-        return sendMessage(env, chatId, "💼 Ketik: nama_dompet jumlah\ncontoh: Bank 5jt", BACK_MENU);
+        return wSetSaldoWallet(env, chatId, uid);
+      case "dw_add":
+        await setMode(env, uid, "dompet_add");
+        return sendMessage(env, chatId, "➕ Ketik nama dompet baru (mis. GoPay):", BACK_MENU);
+      case "dw_delp": return sendWalletPicker(env, chatId, uid, "🗑️ Hapus dompet mana?", "dw_del");
+      case "dw_mainp": return sendWalletPicker(env, chatId, uid, "⭐ Jadikan dompet utama:", "dw_main");
       case "add_hutang":
         await setMode(env, uid, "hutang");
         return sendMessage(env, chatId, "📕 Ketik: nominal nama [ket] [tgl]\ncontoh: 100rb budi bensin tgl 15-3-2025", BACK_MENU);
@@ -332,6 +362,22 @@ async function handleModeInput(env, chatId, uid, mode, text) {
   if (mode === "setsaldo") return handleDompet(env, chatId, uid, "saldo " + text);
   if (mode === "hutang") return handleDebt(env, chatId, uid, "hutang", text);
   if (mode === "piutang") return handleDebt(env, chatId, uid, "piutang", text);
+  if (mode === "cari") return handleCari(env, chatId, uid, text.trim());
+  if (mode === "budget") return handleBudget(env, chatId, uid, text.trim(), BACK_MENU);
+  if (mode === "dompet_add") return handleDompet(env, chatId, uid, "tambah " + text.trim());
+  // Pindah ketik-nominal: mode "pindahamt:<i>:<j>"
+  if (mode.startsWith("pindahamt:")) {
+    const [, i, j] = mode.split(":");
+    const p = parseAmountToken(text);
+    if (!p) return sendMessage(env, chatId, "Nominal tak terbaca. Contoh: 200rb", BACK_MENU);
+    return execPindah(env, chatId, uid, Number(i), Number(j), p.amount);
+  }
+  // Set saldo ketik-nominal: mode "setsaldoamt:<i>"
+  if (mode.startsWith("setsaldoamt:")) {
+    const p = parseAmountToken(text);
+    if (!p) return sendMessage(env, chatId, "Nominal tak terbaca. Contoh: 5jt", BACK_MENU);
+    return execSetSaldo(env, chatId, uid, Number(mode.slice(12)), p.amount);
+  }
   if (mode.startsWith("edit_amount:")) {
     const p = parseAmountToken(text);
     if (!p) return sendMessage(env, chatId, "Nominal tak terbaca. Contoh: 50rb", BACK_MENU);
@@ -2110,7 +2156,10 @@ const MENU_LAPORAN = {
         { text: "💰 Total", callback_data: "total" },
         { text: "🔍 Cari", callback_data: "cari" },
       ],
-      [{ text: "📆 Hari ini", callback_data: "hari" }],
+      [
+        { text: "📅 Laporan bulan lain", callback_data: "lap_pick" },
+        { text: "📆 Hari ini", callback_data: "hari" },
+      ],
       [BACK_BTN],
     ],
   },
@@ -2132,7 +2181,14 @@ const MENU_UTANG = {
 };
 const MENU_BUDGET = {
   reply_markup: {
-    inline_keyboard: [[{ text: "🎯 Lihat budget", callback_data: "budget" }], [BACK_BTN]],
+    inline_keyboard: [
+      [{ text: "🎯 Lihat budget", callback_data: "budget" }],
+      [
+        { text: "✏️ Set budget", callback_data: "budget_set" },
+        { text: "❌ Matikan", callback_data: "budget_off" },
+      ],
+      [BACK_BTN],
+    ],
   },
 };
 const MENU_DOMPET = {
@@ -2177,6 +2233,104 @@ const MENU_LAIN = {
 
 async function sendMenu(env, chatId) {
   return sendMessage(env, chatId, "📱 Menu — pilih kategori:", MENU_MAIN);
+}
+
+// ---------------------------------------------------------------------------
+// Alur berbasis tombol (minim ketik): pindah, set saldo, tarik, budget, dompet
+// ---------------------------------------------------------------------------
+
+const CASH_PRESET = [["10rb", 10000], ["20rb", 20000], ["50rb", 50000], ["100rb", 100000], ["200rb", 200000], ["500rb", 500000]];
+const BIG_PRESET = [["500rb", 500000], ["1jt", 1000000], ["2jt", 2000000], ["3jt", 3000000], ["5jt", 5000000], ["10jt", 10000000]];
+
+function kb(rows) { return { reply_markup: { inline_keyboard: rows } }; }
+function chunk(arr, n) { const out = []; for (let i = 0; i < arr.length; i += n) out.push(arr.slice(i, i + n)); return out; }
+
+// Tampilkan pilihan nominal (preset + ketik). `typeMode` = mode saat user pilih "✏️ Ketik".
+function sendNominalPicker(env, chatId, title, prefix, presets, typeMode) {
+  const rows = chunk(presets.map(([lbl, val]) => ({ text: "Rp" + lbl, callback_data: `${prefix}:${val}` })), 3);
+  rows.push([{ text: "✏️ Ketik nominal", callback_data: `typeamt:${typeMode}` }]);
+  rows.push([BACK_BTN]);
+  return sendMessage(env, chatId, title + "\nPilih cepat atau ketik sendiri:", kb(rows));
+}
+
+// Deretan tombol dompet (pakai indeks agar aman untuk callback).
+async function sendWalletPicker(env, chatId, uid, title, prefix) {
+  const cfg = await getConfig(env, uid);
+  const rows = chunk(cfg.wallets.map((w, i) => ({ text: w, callback_data: `${prefix}:${i}` })), 2);
+  rows.push([BACK_BTN]);
+  return sendMessage(env, chatId, title, kb(rows));
+}
+
+// --- Pindah antar dompet ---
+async function wPindahFrom(env, chatId, uid) {
+  return sendWalletPicker(env, chatId, uid, "🔁 Pindah dana — dari dompet mana?", "pf");
+}
+async function wPindahTo(env, chatId, uid, fromIdx) {
+  const cfg = await getConfig(env, uid);
+  const rows = chunk(
+    cfg.wallets.map((w, i) => ({ w, i })).filter((x) => x.i !== fromIdx).map((x) => ({ text: x.w, callback_data: `pt:${fromIdx}:${x.i}` })),
+    2,
+  );
+  rows.push([BACK_BTN]);
+  return sendMessage(env, chatId, `Dari ${cfg.wallets[fromIdx] || "?"} → ke dompet mana?`, kb(rows));
+}
+function wPindahNominal(env, chatId, uid, i, j) {
+  return sendNominalPicker(env, chatId, "🔁 Pindah berapa?", `pv:${i}:${j}`, CASH_PRESET, `pindahamt:${i}:${j}`);
+}
+async function execPindah(env, chatId, uid, i, j, amount) {
+  const cfg = await getConfig(env, uid);
+  const from = cfg.wallets[i], to = cfg.wallets[j];
+  if (!from || !to) return sendMessage(env, chatId, "Dompet tak valid, coba lagi dari menu.", BACK_MENU);
+  await addEntry(env, uid, { kind: "mutasi", amount, note: `pindah ${from}→${to}`, from, to, ts: Date.now(), src: "tombol" });
+  return sendMessage(env, chatId, `✅ ${fmtRp(amount)} — ${from} → ${to}\n(pindah dompet, bukan pengeluaran)`, BACK_MENU);
+}
+
+// --- Set saldo awal ---
+async function wSetSaldoWallet(env, chatId, uid) {
+  return sendWalletPicker(env, chatId, uid, "💼 Set saldo — dompet mana?", "ssw");
+}
+function wSetSaldoNominal(env, chatId, uid, i) {
+  return sendNominalPicker(env, chatId, "💼 Saldo sekarang berapa?", `ssv:${i}`, BIG_PRESET, `setsaldoamt:${i}`);
+}
+async function execSetSaldo(env, chatId, uid, i, amount) {
+  const cfg = await getConfig(env, uid);
+  const w = cfg.wallets[i];
+  if (!w) return sendMessage(env, chatId, "Dompet tak valid, coba lagi dari menu.", BACK_MENU);
+  return handleDompet(env, chatId, uid, `saldo ${w} ${amount}`);
+}
+
+// --- Dompet: menu kelola berbasis tombol ---
+async function sendDompetMenu(env, chatId, uid) {
+  const cfg = await getConfig(env, uid);
+  const bal = walletBalances(await getEntries(env, uid), cfg);
+  const lines = ["👛 Dompet:", ""];
+  for (const w of cfg.wallets) lines.push(`• ${w}: ${fmtRp(bal[w] || 0)}${w === cfg.defaultWallet ? " ⭐" : ""}`);
+  const rows = [
+    [{ text: "➕ Tambah", callback_data: "dw_add" }, { text: "🗑️ Hapus", callback_data: "dw_delp" }],
+    [{ text: "⭐ Set utama", callback_data: "dw_mainp" }, { text: "💼 Set saldo", callback_data: "add_setsaldo" }],
+    [BACK_BTN],
+  ];
+  return sendMessage(env, chatId, lines.join("\n"), kb(rows));
+}
+async function dompetByIndex(env, chatId, uid, action, i) {
+  const cfg = await getConfig(env, uid);
+  const w = cfg.wallets[i];
+  if (!w) return sendMessage(env, chatId, "Dompet tak valid.", BACK_MENU);
+  return handleDompet(env, chatId, uid, `${action} ${w}`);
+}
+
+// --- Laporan: pilih bulan (6 bulan terakhir) ---
+function sendMonthPicker(env, chatId, uid) {
+  const now = wibParts(Date.now());
+  const btns = [];
+  for (let k = 0; k < 6; k++) {
+    let m = now.m - k, y = now.y;
+    while (m <= 0) { m += 12; y -= 1; }
+    btns.push({ text: `${NAMA_BULAN[m - 1]} ${y}`, callback_data: `lap:${y}-${String(m).padStart(2, "0")}` });
+  }
+  const rows = chunk(btns, 2);
+  rows.push([BACK_BTN]);
+  return sendMessage(env, chatId, "📅 Laporan bulan mana?", kb(rows));
 }
 
 async function answerCallback(env, callbackId) {
