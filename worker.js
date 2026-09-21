@@ -169,18 +169,43 @@ async function handleCallback(env, cq) {
       await setMode(env, uid, data.slice(8));
       return sendMessage(env, chatId, "✏️ Ketik nominal (mis. 75rb):", BACK_MENU);
     }
-    // Preset keterangan pengeluaran: pilih -> tinggal ketik nominal.
-    if (data.startsWith("kn:")) {
+    // Preset keterangan: pilih -> tinggal ketik nominal.
+    if (data.startsWith("pn:")) {
+      const [, kind, i] = data.split(":");
       const cfg = await getConfig(env, uid);
-      const note = expensePresets(cfg)[Number(data.slice(3))];
+      const note = presetsFor(cfg, kind)[Number(i)];
       if (!note) return sendMessage(env, chatId, "Preset tak ada, coba lagi.", BACK_MENU);
-      await setMode(env, uid, "keluarnote:" + note);
-      return sendMessage(env, chatId, `🔴 ${note} — ketik nominalnya saja (mis. 25rb):`, BACK_MENU);
+      await setMode(env, uid, `note:${kind}:${note}`);
+      const emo = kind === "masuk" ? "🟢" : "🔴";
+      return sendMessage(env, chatId, `${emo} ${note} — ketik nominalnya saja (mis. 25rb):`, BACK_MENU);
+    }
+    if (data.startsWith("free:")) {
+      const kind = data.slice(5);
+      await setMode(env, uid, kind);
+      const ex = kind === "masuk" ? "5jt gaji" : "50rb makan siang";
+      return sendMessage(env, chatId, `✏️ Ketik nominal + keterangan\ncontoh: ${ex}`, BACK_MENU);
+    }
+    if (data.startsWith("pmng:")) return sendPresetManage(env, chatId, uid, data.slice(5));
+    if (data.startsWith("padd:")) {
+      const kind = data.slice(5);
+      await setMode(env, uid, `padd:${kind}`);
+      return sendMessage(env, chatId, "➕ Ketik nama preset baru (mis. Rokok, Galon, Kos):", BACK_MENU);
     }
     if (data.startsWith("pdel:")) {
-      await removePreset(env, uid, Number(data.slice(5)));
-      return sendPresetManage(env, chatId, uid);
+      const [, kind, i] = data.split(":");
+      await removePreset(env, uid, kind, Number(i));
+      return sendPresetManage(env, chatId, uid, kind);
     }
+    if (data.startsWith("prst:")) {
+      const kind = data.slice(5);
+      const cfg = await getConfig(env, uid);
+      cfg[presetField(kind)] = null;
+      await saveConfig(env, uid, cfg);
+      return sendPresetManage(env, chatId, uid, kind);
+    }
+
+    // Kembali ke menu/kategori -> bersihkan mode nyangkut biar ketikan berikutnya tak salah tafsir.
+    if (data === "menu" || data.startsWith("cat_")) await clearMode(env, uid);
 
     switch (data) {
       case "menu": return sendMenu(env, chatId);
@@ -217,23 +242,9 @@ async function handleCallback(env, cq) {
       case "help": return sendMessage(env, chatId, helpText(), BACK_MENU);
       case "edit": return sendEditList(env, chatId, uid);
       case "add_keluar":
-        return sendKeluarPicker(env, chatId, uid);
-      case "keluar_free":
-        await setMode(env, uid, "keluar");
-        return sendMessage(env, chatId, "🔴 Ketik pengeluaran: nominal + keterangan\ncontoh: 50rb makan siang\n(tanggal opsional: 50rb makan tgl 15-3)", BACK_MENU);
-      case "preset_manage": return sendPresetManage(env, chatId, uid);
-      case "preset_add":
-        await setMode(env, uid, "preset_add");
-        return sendMessage(env, chatId, "➕ Ketik nama preset baru (mis. Rokok, Galon, Laundry):", BACK_MENU);
-      case "preset_reset": {
-        const cfg = await getConfig(env, uid);
-        cfg.presets = null;
-        await saveConfig(env, uid, cfg);
-        return sendPresetManage(env, chatId, uid);
-      }
+        return sendCatatPicker(env, chatId, uid, "keluar");
       case "add_masuk":
-        await setMode(env, uid, "masuk");
-        return sendMessage(env, chatId, "🟢 Ketik pemasukan (langsung):\ncontoh: 5jt gaji", BACK_MENU);
+        return sendCatatPicker(env, chatId, uid, "masuk");
       case "add_mutasi":
         return sendNominalPicker(env, chatId, "💵 Tarik tunai berapa? (Bank → Cash)", "mv", CASH_PRESET, "mutasi");
       case "add_pindah":
@@ -389,11 +400,19 @@ async function handleModeInput(env, chatId, uid, mode, text) {
   if (mode === "cari") return handleCari(env, chatId, uid, text.trim());
   if (mode === "budget") return handleBudget(env, chatId, uid, text.trim(), BACK_MENU);
   if (mode === "dompet_add") return handleDompet(env, chatId, uid, "tambah " + text.trim());
-  if (mode.startsWith("keluarnote:")) return recordFlow(env, chatId, uid, `${text.trim()} ${mode.slice(11)}`);
-  if (mode === "preset_add") {
-    await addPreset(env, uid, text);
+  if (mode.startsWith("note:")) {
+    const rest = mode.slice(5);
+    const sep = rest.indexOf(":");
+    const kind = rest.slice(0, sep);
+    const note = rest.slice(sep + 1);
+    const prefix = kind === "masuk" ? "+" : "";
+    return recordFlow(env, chatId, uid, `${prefix}${text.trim()} ${note}`);
+  }
+  if (mode.startsWith("padd:")) {
+    const kind = mode.slice(5);
+    await addPreset(env, uid, kind, text);
     await sendMessage(env, chatId, `✅ Preset "${text.trim()}" ditambah.`);
-    return sendKeluarPicker(env, chatId, uid);
+    return sendCatatPicker(env, chatId, uid, kind);
   }
   // Pindah ketik-nominal: mode "pindahamt:<i>:<j>"
   if (mode.startsWith("pindahamt:")) {
@@ -867,14 +886,19 @@ async function getConfig(env, uid) {
     wallets: Array.isArray(c.wallets) && c.wallets.length ? c.wallets : ["Cash", "Bank"],
     defaultWallet: c.defaultWallet || "Cash",
     useGemini: c.useGemini !== false, // default true (pakai Gemini bila key ada)
-    presets: Array.isArray(c.presets) ? c.presets : null, // null = pakai default
+    presets: Array.isArray(c.presets) ? c.presets : null, // pengeluaran; null = default
+    incomePresets: Array.isArray(c.incomePresets) ? c.incomePresets : null, // pemasukan
   };
 }
 
-// Preset keterangan cepat pengeluaran (default + custom user).
+// Preset keterangan cepat (default + custom user), per arah kas.
 const DEFAULT_PRESETS = ["Makan", "Kopi", "Jajan", "Bensin", "Parkir", "Belanja", "Pulsa", "Grab"];
-function expensePresets(cfg) {
-  return cfg.presets && cfg.presets.length ? cfg.presets : DEFAULT_PRESETS;
+const DEFAULT_INCOME_PRESETS = ["Gaji", "Bonus", "THR", "Transferan", "Jualan", "Bunga"];
+function presetField(kind) { return kind === "masuk" ? "incomePresets" : "presets"; }
+function presetsFor(cfg, kind) {
+  const def = kind === "masuk" ? DEFAULT_INCOME_PRESETS : DEFAULT_PRESETS;
+  const cur = cfg[presetField(kind)];
+  return cur && cur.length ? cur : def;
 }
 
 // Cari nama dompet yang cocok (case-insensitive).
@@ -2282,43 +2306,49 @@ const BIG_PRESET = [["500rb", 500000], ["1jt", 1000000], ["2jt", 2000000], ["3jt
 function kb(rows) { return { reply_markup: { inline_keyboard: rows } }; }
 function chunk(arr, n) { const out = []; for (let i = 0; i < arr.length; i += n) out.push(arr.slice(i, i + n)); return out; }
 
-// --- Preset keterangan pengeluaran (default + custom) ---
-async function sendKeluarPicker(env, chatId, uid) {
+// --- Preset keterangan (generik: kind "keluar" / "masuk") ---
+async function sendCatatPicker(env, chatId, uid, kind) {
   const cfg = await getConfig(env, uid);
-  const presets = expensePresets(cfg);
-  const rows = chunk(presets.map((p, i) => ({ text: p, callback_data: `kn:${i}` })), 3);
+  const presets = presetsFor(cfg, kind);
+  const rows = chunk(presets.map((p, i) => ({ text: p, callback_data: `pn:${kind}:${i}` })), 3);
   rows.push([
-    { text: "✏️ Ketik bebas", callback_data: "keluar_free" },
-    { text: "⚙️ Preset", callback_data: "preset_manage" },
+    { text: "✏️ Ketik bebas", callback_data: `free:${kind}` },
+    { text: "⚙️ Preset", callback_data: `pmng:${kind}` },
   ]);
   rows.push([BACK_BTN]);
-  return sendMessage(env, chatId, "🔴 Pengeluaran — tap keterangan lalu ketik nominalnya.\nAtau ✏️ Ketik bebas (nominal + keterangan sekaligus).", kb(rows));
+  const head = kind === "masuk"
+    ? "🟢 Pemasukan — tap sumber lalu ketik nominalnya."
+    : "🔴 Pengeluaran — tap keterangan lalu ketik nominalnya.";
+  return sendMessage(env, chatId, head + "\nAtau ✏️ Ketik bebas (nominal + keterangan sekaligus).", kb(rows));
 }
-async function sendPresetManage(env, chatId, uid) {
+async function sendPresetManage(env, chatId, uid, kind) {
   const cfg = await getConfig(env, uid);
-  const presets = expensePresets(cfg);
-  const rows = chunk(presets.map((p, i) => ({ text: `🗑️ ${p}`, callback_data: `pdel:${i}` })), 2);
-  rows.unshift([{ text: "➕ Tambah preset", callback_data: "preset_add" }]);
-  rows.push([{ text: "↩️ Reset ke default", callback_data: "preset_reset" }]);
-  rows.push([{ text: "🔙 Pengeluaran", callback_data: "add_keluar" }, BACK_BTN]);
-  return sendMessage(env, chatId, "⚙️ Kelola preset keterangan pengeluaran.\nTap 🗑️ untuk hapus, atau tambah baru:", kb(rows));
+  const presets = presetsFor(cfg, kind);
+  const rows = chunk(presets.map((p, i) => ({ text: `🗑️ ${p}`, callback_data: `pdel:${kind}:${i}` })), 2);
+  rows.unshift([{ text: "➕ Tambah preset", callback_data: `padd:${kind}` }]);
+  rows.push([{ text: "↩️ Reset ke default", callback_data: `prst:${kind}` }]);
+  rows.push([{ text: kind === "masuk" ? "🔙 Pemasukan" : "🔙 Pengeluaran", callback_data: kind === "masuk" ? "add_masuk" : "add_keluar" }, BACK_BTN]);
+  const label = kind === "masuk" ? "pemasukan" : "pengeluaran";
+  return sendMessage(env, chatId, `⚙️ Kelola preset ${label}.\nTap 🗑️ untuk hapus, atau tambah baru:`, kb(rows));
 }
-async function addPreset(env, uid, label) {
+async function addPreset(env, uid, kind, label) {
   label = (label || "").trim().slice(0, 20);
   if (!label) return;
   const cfg = await getConfig(env, uid);
-  const list = cfg.presets && cfg.presets.length ? cfg.presets.slice() : DEFAULT_PRESETS.slice();
+  const f = presetField(kind);
+  const list = presetsFor(cfg, kind).slice();
   if (list.some((x) => x.toLowerCase() === label.toLowerCase())) return;
   list.push(label);
-  cfg.presets = list.slice(0, 24);
+  cfg[f] = list.slice(0, 24);
   await saveConfig(env, uid, cfg);
 }
-async function removePreset(env, uid, idx) {
+async function removePreset(env, uid, kind, idx) {
   const cfg = await getConfig(env, uid);
-  const list = cfg.presets && cfg.presets.length ? cfg.presets.slice() : DEFAULT_PRESETS.slice();
+  const f = presetField(kind);
+  const list = presetsFor(cfg, kind).slice();
   if (idx < 0 || idx >= list.length) return;
   list.splice(idx, 1);
-  cfg.presets = list;
+  cfg[f] = list;
   await saveConfig(env, uid, cfg);
 }
 
