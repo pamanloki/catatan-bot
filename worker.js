@@ -144,6 +144,8 @@ async function handleCallback(env, cq) {
       });
     }
     if (data === "del_all_yes") return doHapusAll(env, chatId, uid, BACK_MENU);
+    if (data === "impor") return handleImportStart(env, chatId, uid);
+    if (data === "doimport") return doImport(env, chatId, uid);
     switch (data) {
       case "menu": return sendMenu(env, chatId);
       // Submenu kategori
@@ -204,10 +206,14 @@ async function handleCallback(env, cq) {
 async function routeMessage(env, chatId, msg) {
   const uid = msg.from.id;
 
-  // Foto struk?
+  // Foto (struk atau impor screenshot)
   if (Array.isArray(msg.photo) && msg.photo.length) {
     const pmode = await getMode(env, uid);
     if (pmode) await clearMode(env, uid);
+    const cap = (msg.caption || "").trim().toLowerCase();
+    if (pmode === "impor" || /^(impor|import)\b/.test(cap)) {
+      return handleImportScreenshot(env, chatId, msg);
+    }
     return handleReceiptPhoto(env, chatId, msg, pmode);
   }
 
@@ -232,6 +238,7 @@ async function routeMessage(env, chatId, msg) {
   if (lower.startsWith("/excel")) return exportExcel(env, chatId, uid);
   if (lower.startsWith("/export")) return exportCsv(env, chatId, uid);
   if (lower.startsWith("/ai")) return handleAi(env, chatId, uid, text.slice(3).trim());
+  if (lower.startsWith("/impor") || lower.startsWith("/import")) return handleImportStart(env, chatId, uid);
   if (lower.startsWith("/backup")) return handleBackup(env, chatId, uid);
   if (lower.startsWith("/restore")) return sendMessage(env, chatId, "📥 Kirim file backup (.json) ke sini untuk memulihkan data.", BACK_MENU);
   if (lower.startsWith("/hapus")) return handleHapus(env, chatId, uid, text.slice(6).trim());
@@ -1154,6 +1161,194 @@ async function handleBackup(env, chatId, uid, markup) {
   if (markup) await sendMessage(env, chatId, "Selesai. 👇", markup);
 }
 
+// ---------------------------------------------------------------------------
+// Impor dari screenshot (daftar transaksi dari app lain) — pakai Gemini
+// ---------------------------------------------------------------------------
+
+function impKey(uid) {
+  return `imp:${uid}`;
+}
+
+async function handleImportStart(env, chatId, uid) {
+  if (!env.GEMINI_API_KEY) {
+    return sendMessage(env, chatId, "Impor screenshot butuh Gemini (GEMINI_API_KEY) karena harus baca banyak baris. Set dulu di Worker ya.", BACK_MENU);
+  }
+  await setMode(env, uid, "impor");
+  return sendMessage(
+    env,
+    chatId,
+    "🖼️ Kirim SATU screenshot daftar transaksi dari app lamamu.\nAku baca semua barisnya, tampilkan preview, baru kamu konfirmasi.\n(Riwayat panjang? kirim beberapa SS satu per satu.)",
+    BACK_MENU,
+  );
+}
+
+const IMPORT_PROMPT =
+  "Ini screenshot DAFTAR transaksi keuangan dari aplikasi. Ekstrak SEMUA baris transaksi yang terlihat. " +
+  "Untuk tiap baris tentukan: jenis 'masuk' (pemasukan/income) atau 'keluar' (pengeluaran/expense) — " +
+  "biasanya pemasukan berwarna hijau/plus, pengeluaran merah/minus; " +
+  "jumlah = angka rupiah hanya digit tanpa titik/koma; " +
+  "keterangan = nama/kategori transaksi; " +
+  "tanggal = format DD-MM-YYYY bila terbaca, kalau tidak ada kosongkan. " +
+  "Jangan mengarang baris yang tidak ada. Balas JSON.";
+
+async function handleImportScreenshot(env, chatId, msg) {
+  const uid = msg.from.id;
+  if (!env.GEMINI_API_KEY) {
+    return sendMessage(env, chatId, "Impor screenshot butuh GEMINI_API_KEY.", BACK_MENU);
+  }
+  await sendMessage(env, chatId, "🔎 Membaca screenshot...");
+  const photo = msg.photo[msg.photo.length - 1];
+  const bytes = await getTelegramFile(env, photo.file_id);
+
+  const res = await extractTransactionsGemini(env, bytes);
+  if (!res.ok || !res.rows.length) {
+    const why = res.debug ? `\n\n(debug: ${res.debug})` : "";
+    return sendMessage(env, chatId, "Tidak ada transaksi terbaca dari gambar. Coba SS lebih jelas." + why, BACK_MENU);
+  }
+
+  // Normalisasi + simpan sementara.
+  const rows = res.rows.slice(0, 200).map((r) => {
+    const kind = /masuk|income|pemasukan|\+/i.test(String(r.jenis)) ? "masuk" : "keluar";
+    const amount = Math.round(Number(String(r.jumlah).replace(/[^\d]/g, "")) || 0);
+    const note = (r.keterangan || "").toString().trim() || "(impor)";
+    const ts = parseAnyDate(r.tanggal || "") || 0;
+    return { kind, amount, note, ts };
+  }).filter((r) => r.amount > 0);
+
+  if (!rows.length) return sendMessage(env, chatId, "Baris terbaca tapi nominalnya kosong. Coba SS lebih jelas.", BACK_MENU);
+
+  await env.EXPENSES.put(impKey(uid), JSON.stringify(rows), { expirationTtl: 900 });
+
+  let masuk = 0, keluar = 0;
+  for (const r of rows) (r.kind === "masuk" ? (masuk += r.amount) : (keluar += r.amount));
+  const preview = rows.slice(0, 15).map((r) => {
+    const ic = r.kind === "masuk" ? "🟢" : "🔴";
+    const tg = r.ts ? tglPendek(r.ts) : "-";
+    return `${ic} ${tg} · ${fmtRp(r.amount)} — ${r.note}`;
+  });
+  const lines = [
+    `📋 Terbaca ${rows.length} transaksi:`,
+    "",
+    ...preview,
+    rows.length > 15 ? `… dan ${rows.length - 15} lagi` : "",
+    "",
+    `🟢 Masuk: ${fmtRp(masuk)}  🔴 Keluar: ${fmtRp(keluar)}`,
+    "",
+    "Simpan semua? (yang tanpa tanggal dipakai hari ini)",
+  ].filter((x) => x !== "");
+  return sendMessage(env, chatId, lines.join("\n"), {
+    reply_markup: {
+      inline_keyboard: [[{ text: `✅ Simpan ${rows.length} transaksi`, callback_data: "doimport" }], [{ text: "Batal", callback_data: "menu" }]],
+    },
+  });
+}
+
+async function doImport(env, chatId, uid) {
+  const raw = await env.EXPENSES.get(impKey(uid));
+  if (!raw) return sendMessage(env, chatId, "Data impor tidak ada / kadaluarsa. Kirim ulang screenshot-nya.", BACK_MENU);
+  const rows = JSON.parse(raw);
+  const list = await getEntries(env, uid);
+  const cfg = await getConfig(env, uid);
+  for (const r of rows) {
+    list.push({
+      ts: r.ts || Date.now(),
+      kind: r.kind,
+      amount: r.amount,
+      note: r.note,
+      category: r.kind === "keluar" ? categorize(r.note) : "",
+      party: "",
+      status: "",
+      wallet: cfg.defaultWallet,
+      from: "",
+      to: "",
+      src: "impor",
+    });
+  }
+  await saveEntries(env, uid, list);
+  await env.EXPENSES.delete(impKey(uid));
+  return sendMessage(env, chatId, `✅ ${rows.length} transaksi diimpor.`, BACK_MENU);
+}
+
+async function extractTransactionsGemini(env, arrayBuffer) {
+  const model = (env.GEMINI_MODEL || "gemini-3.6-flash").trim();
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${env.GEMINI_API_KEY}`;
+  const body = {
+    contents: [{ parts: [{ text: IMPORT_PROMPT }, { inline_data: { mime_type: "image/jpeg", data: abToBase64(arrayBuffer) } }] }],
+    generationConfig: {
+      temperature: 0,
+      maxOutputTokens: 4096,
+      responseMimeType: "application/json",
+      responseSchema: {
+        type: "object",
+        properties: {
+          transaksi: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                tanggal: { type: "string" },
+                jenis: { type: "string" },
+                jumlah: { type: "integer" },
+                keterangan: { type: "string" },
+              },
+              required: ["jenis", "jumlah", "keterangan"],
+            },
+          },
+        },
+        required: ["transaksi"],
+      },
+    },
+  };
+  let status = 0, bodyText = "";
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const r = await fetchWithTimeout(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }, 60000);
+      status = r.status;
+      bodyText = await r.text();
+    } catch (e) {
+      await sleep(1200 * attempt);
+      continue;
+    }
+    const transient = status === 429 || status >= 500 || /high demand|overloaded|unavailable|try again/i.test(bodyText);
+    if (transient && attempt < 3) { await sleep(1200 * attempt); continue; }
+    break;
+  }
+  let j;
+  try { j = JSON.parse(bodyText); } catch { return { ok: false, rows: [], debug: `HTTP ${status}: ${bodyText.slice(0, 120)}` }; }
+  if (status !== 200 || j.error) return { ok: false, rows: [], debug: (j.error && j.error.message) || `HTTP ${status}` };
+  const cand = j.candidates && j.candidates[0];
+  const parts = cand && cand.content && cand.content.parts;
+  const text = (parts || []).map((p) => p.text || "").join("");
+  try {
+    const obj = JSON.parse(text.match(/\{[\s\S]*\}/)[0]);
+    return { ok: true, rows: Array.isArray(obj.transaksi) ? obj.transaksi : [] };
+  } catch {
+    return { ok: false, rows: [], debug: "balasan bukan JSON" };
+  }
+}
+
+// Parse tanggal fleksibel: DD-MM-YYYY, DD/MM/YYYY, "15 Sep 2026". -> ts (WIB) atau 0.
+function parseAnyDate(s) {
+  s = String(s || "").trim();
+  if (!s) return 0;
+  let m = s.match(/(\d{1,2})[-/ ](\d{1,2})[-/ ](\d{2,4})/);
+  if (m) {
+    let [_, d, mo, y] = m;
+    d = +d; mo = +mo; y = +y;
+    if (y < 100) y += 2000;
+    if (d > 31 || mo > 12) return 0;
+    return Date.UTC(y, mo - 1, d, 12) - WIB_OFFSET_MS;
+  }
+  m = s.match(/(\d{1,2})\s+([A-Za-z]{3,})\s+(\d{4})/);
+  if (m) {
+    const bulan = ["jan", "feb", "mar", "apr", "mei", "may", "jun", "jul", "agu", "aug", "sep", "okt", "oct", "nov", "des", "dec"];
+    const idx = { jan: 1, feb: 2, mar: 3, apr: 4, mei: 5, may: 5, jun: 6, jul: 7, agu: 8, aug: 8, sep: 9, okt: 10, oct: 10, nov: 11, des: 12, dec: 12 };
+    const key = m[2].slice(0, 3).toLowerCase();
+    if (idx[key]) return Date.UTC(+m[3], idx[key] - 1, +m[1], 12) - WIB_OFFSET_MS;
+  }
+  return 0;
+}
+
 // /ai            -> status mesin baca struk + tombol
 // /ai on | off   -> pakai Gemini (on) atau Workers AI (off)
 async function handleAi(env, chatId, uid, arg) {
@@ -1799,6 +1994,7 @@ function helpText() {
     "🟢 Pemasukan   : +5jt gaji           (awali +)",
     "💵 Tarik tunai : tarik 500rb         (Bank→Cash, bukan pengeluaran)",
     "🧾 Foto struk  : kirim fotonya (dibaca AI → pengeluaran)",
+    "🖼️ Impor SS   : /impor lalu kirim screenshot daftar transaksi app lain",
     "",
     "Opsi tambahan saat mencatat:",
     "• Dompet   : @nama   → 50rb makan @gopay",
@@ -1894,6 +2090,7 @@ const MENU_CATAT = {
         { text: "🟢 + Masuk", callback_data: "add_masuk" },
       ],
       [{ text: "💵 Tarik tunai", callback_data: "add_mutasi" }],
+      [{ text: "🖼️ Impor dari screenshot", callback_data: "impor" }],
       [BACK_BTN],
     ],
   },
