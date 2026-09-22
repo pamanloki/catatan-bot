@@ -79,6 +79,8 @@ Mau coba model lain (Qwen-VL, dll) tanpa ganti kode:
    mis. `qwen/qwen-2.5-vl-72b-instruct`), lalu Deploy.
 3. Di bot ketik `/ai qwen` (atau tombol **🐉 Qwen-VL** di menu `/ai`) untuk menjadikannya mesin utama.
    Kalau mesin utama gagal, bot otomatis coba mesin lain yang tersedia.
+4. **Pilih model** lewat `/model` (atau tombol **🎛️ Pilih model** di menu `/ai`): ada daftar model
+   vision siap pakai + opsi **ketik slug sendiri**. Pilihan model disimpan per user.
 
 > **Penting:** model teks biasa (mis. `qwen-flash`/`qwen-turbo`) **tidak bisa** baca gambar.
 > Harus model **vision/VL**.

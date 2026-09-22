@@ -141,6 +141,16 @@ async function handleCallback(env, cq) {
     if (data === "ai_on") return handleAi(env, chatId, uid, "on");
     if (data === "ai_qwen") return handleAi(env, chatId, uid, "qwen");
     if (data === "ai_off") return handleAi(env, chatId, uid, "off");
+    if (data === "ai_model") return handleModelMenu(env, chatId, uid);
+    if (data.startsWith("orm:")) {
+      const m = OR_MODELS[Number(data.slice(4))];
+      if (m) return setOrModel(env, chatId, uid, m.id);
+      return handleModelMenu(env, chatId, uid);
+    }
+    if (data === "orm_custom") {
+      await setMode(env, uid, "or_model");
+      return sendMessage(env, chatId, "Ketik slug model OpenRouter (mis. qwen/qwen-2.5-vl-7b-instruct). Harus model vision/VL.");
+    }
     if (data === "del_last") return deleteLast(env, chatId, uid, BACK_MENU);
     if (data === "del_all") {
       return sendMessage(env, chatId, "⚠️ Hapus SEMUA catatan? Tidak bisa dibatalkan.\nSaran: /backup dulu.", {
@@ -336,6 +346,7 @@ async function routeMessage(env, chatId, msg) {
   if (lower.startsWith("/total")) return sendTotal(env, chatId, uid);
   if (lower.startsWith("/excel")) return exportExcel(env, chatId, uid);
   if (lower.startsWith("/export")) return exportCsv(env, chatId, uid);
+  if (lower.startsWith("/model")) return handleModelMenu(env, chatId, uid);
   if (lower.startsWith("/ai")) return handleAi(env, chatId, uid, text.slice(3).trim());
   if (lower.startsWith("/impor") || lower.startsWith("/import")) return handleImportStart(env, chatId, uid);
   if (lower.startsWith("/backup")) return handleBackup(env, chatId, uid);
@@ -432,6 +443,11 @@ async function handleModeInput(env, chatId, uid, mode, text) {
   if (mode === "cari") return handleCari(env, chatId, uid, text.trim());
   if (mode === "budget") return handleBudget(env, chatId, uid, text.trim(), BACK_MENU);
   if (mode === "dompet_add") return handleDompet(env, chatId, uid, "tambah " + text.trim());
+  if (mode === "or_model") {
+    const slug = text.trim();
+    if (!/^[\w.-]+\/[\w.:-]+$/.test(slug)) return sendMessage(env, chatId, "Format slug tak valid. Contoh: qwen/qwen-2.5-vl-7b-instruct", BACK_MENU);
+    return setOrModel(env, chatId, uid, slug);
+  }
   if (mode.startsWith("note:")) {
     const rest = mode.slice(5);
     const sep = rest.indexOf(":");
@@ -722,7 +738,7 @@ async function readReceipt(env, arrayBuffer, cfg) {
   for (const eng of order) {
     let r = null;
     if (eng === "gemini") r = await readReceiptGemini(env, arrayBuffer);
-    else if (eng === "qwen") r = await readReceiptOpenRouter(env, arrayBuffer);
+    else if (eng === "qwen") r = await readReceiptOpenRouter(env, arrayBuffer, cfg);
     else if (eng === "workers") r = await readReceiptWorkersAI(env, arrayBuffer);
     if (r && r.amount) return r;
     if (r) last = r; // simpan info debug terakhir yang informatif
@@ -822,10 +838,25 @@ async function readReceiptWorkersAI(env, arrayBuffer) {
   return parseReceiptJson((out && (out.response || out.description || "")) + "");
 }
 
+// Daftar model VISION di OpenRouter untuk menu pilih model. Slug bisa berubah
+// sewaktu-waktu; kalau tak ada yang cocok, user pakai opsi "ketik model sendiri".
+const OR_MODELS = [
+  { id: "qwen/qwen-2.5-vl-72b-instruct", label: "Qwen2.5-VL 72B (paling akurat)" },
+  { id: "qwen/qwen-2.5-vl-7b-instruct", label: "Qwen2.5-VL 7B (murah/cepat)" },
+  { id: "meta-llama/llama-3.2-11b-vision-instruct", label: "Llama 3.2 11B Vision" },
+  { id: "mistralai/pixtral-12b", label: "Pixtral 12B" },
+  { id: "google/gemini-2.0-flash-001", label: "Gemini 2.0 Flash (vision)" },
+];
+
+// Model OpenRouter efektif: pilihan user > secret OPENROUTER_MODEL > default.
+function orModel(env, cfg) {
+  return ((cfg && cfg.orModel) || env.OPENROUTER_MODEL || "qwen/qwen-2.5-vl-72b-instruct").trim();
+}
+
 // Qwen-VL (atau model vision lain) lewat OpenRouter — API OpenAI-compatible.
-// Model default bisa diganti lewat secret OPENROUTER_MODEL (harus model *vision*).
-async function readReceiptOpenRouter(env, arrayBuffer) {
-  const model = (env.OPENROUTER_MODEL || "qwen/qwen-2.5-vl-72b-instruct").trim();
+// Model dari menu /model, secret OPENROUTER_MODEL, atau default (harus model *vision*).
+async function readReceiptOpenRouter(env, arrayBuffer, cfg) {
+  const model = orModel(env, cfg);
   const url = "https://openrouter.ai/api/v1/chat/completions";
   const dataUrl = "data:image/jpeg;base64," + abToBase64(arrayBuffer);
   const body = {
@@ -1116,6 +1147,7 @@ async function getConfig(env, uid) {
     defaultWallet: c.defaultWallet || "Cash",
     useGemini: c.useGemini !== false, // default true (pakai Gemini bila key ada) — dipertahankan utk kompatibilitas
     ocr: c.ocr || null, // mesin OCR utama: "gemini" | "qwen" | "workers" (null = turunkan dari useGemini)
+    orModel: c.orModel || null, // model OpenRouter pilihan user (null = pakai OPENROUTER_MODEL / default)
     presets: Array.isArray(c.presets) ? c.presets : null, // pengeluaran; null = default
     incomePresets: Array.isArray(c.incomePresets) ? c.incomePresets : null, // pemasukan
   };
@@ -1722,14 +1754,45 @@ async function handleAi(env, chatId, uid, arg) {
       { text: "🐉 Qwen-VL", callback_data: "ai_qwen" },
     ],
     [{ text: "☁️ Workers AI (privat)", callback_data: "ai_off" }],
-    [BACK_BTN],
   ];
+  if (env.OPENROUTER_API_KEY) rows.push([{ text: "🎛️ Pilih model (OpenRouter)", callback_data: "ai_model" }]);
+  rows.push([BACK_BTN]);
+  const modelNow = env.OPENROUTER_API_KEY ? `\nModel OpenRouter: <code>${orModel(env, cfg)}</code>` : "";
   return sendMessage(
     env,
     chatId,
-    `Mesin baca struk utama: <b>${aktif}</b>\nCadangan otomatis: ${cadangan}\n${st}\n\n• Gemini: akurat, data via Google (free tier).\n• Qwen-VL (OpenRouter): akurat, model bisa diganti (secret <code>OPENROUTER_MODEL</code>).\n• Workers AI: paling privat (tetap di Cloudflare), kurang akurat.\n\nKalau mesin utama gagal, otomatis dicoba yang lain.`,
+    `Mesin baca struk utama: <b>${aktif}</b>\nCadangan otomatis: ${cadangan}\n${st}${modelNow}\n\n• Gemini: akurat, data via Google (free tier).\n• Qwen-VL (OpenRouter): akurat, model bisa dipilih dari menu.\n• Workers AI: paling privat (tetap di Cloudflare), kurang akurat.\n\nKalau mesin utama gagal, otomatis dicoba yang lain.`,
     { reply_markup: { inline_keyboard: rows }, parse_mode: "HTML" },
   );
+}
+
+// Menu pilih model OpenRouter (vision). /model atau tombol di menu /ai.
+async function handleModelMenu(env, chatId, uid) {
+  if (!env.OPENROUTER_API_KEY) {
+    return sendMessage(env, chatId, "Pilih model butuh OpenRouter. Set Secret OPENROUTER_API_KEY dulu (openrouter.ai/keys), lalu Deploy.", BACK_MENU);
+  }
+  const cfg = await getConfig(env, uid);
+  const now = orModel(env, cfg);
+  const rows = OR_MODELS.map((m, i) => [
+    { text: `${m.id === now ? "✅ " : ""}${m.label}`, callback_data: `orm:${i}` },
+  ]);
+  rows.push([{ text: "✏️ Ketik model sendiri", callback_data: "orm_custom" }]);
+  rows.push([BACK_BTN]);
+  return sendMessage(
+    env,
+    chatId,
+    `🎛️ Pilih model OpenRouter (harus model <b>vision/VL</b>)\nAktif sekarang: <code>${now}</code>\n\nModel teks biasa tak bisa baca struk.`,
+    { reply_markup: { inline_keyboard: rows }, parse_mode: "HTML" },
+  );
+}
+
+// Simpan pilihan model OpenRouter + jadikan Qwen mesin utama.
+async function setOrModel(env, chatId, uid, model) {
+  const cfg = await getConfig(env, uid);
+  cfg.orModel = model.trim();
+  cfg.ocr = "qwen"; cfg.useGemini = true;
+  await saveConfig(env, uid, cfg);
+  return sendMessage(env, chatId, `✅ Model OpenRouter diset: <code>${cfg.orModel}</code>\nMesin baca struk sekarang: Qwen-VL/OpenRouter.`, { ...BACK_MENU, parse_mode: "HTML" });
 }
 
 // Terima file .json -> validasi -> minta konfirmasi sebelum menimpa.
