@@ -139,6 +139,7 @@ async function handleCallback(env, cq) {
     if (data.startsWith("del:")) return deleteByTs(env, chatId, uid, Number(data.slice(4)));
     if (data === "dorestore") return doRestore(env, chatId, uid);
     if (data === "ai_on") return handleAi(env, chatId, uid, "on");
+    if (data === "ai_qwen") return handleAi(env, chatId, uid, "qwen");
     if (data === "ai_off") return handleAi(env, chatId, uid, "off");
     if (data === "del_last") return deleteLast(env, chatId, uid, BACK_MENU);
     if (data === "del_all") {
@@ -504,8 +505,8 @@ const RECEIPT_PROMPT =
   "Meski foto agak terpotong/buram, tetap beri tebakan angka terbaikmu; jangan menolak.";
 
 async function handleReceiptPhoto(env, chatId, msg, mode) {
-  if (!env.AI && !env.GEMINI_API_KEY) {
-    return sendMessage(env, chatId, "Fitur foto struk belum aktif (binding Workers AI 'AI' atau GEMINI_API_KEY belum diset).");
+  if (!env.AI && !env.GEMINI_API_KEY && !env.OPENROUTER_API_KEY) {
+    return sendMessage(env, chatId, "Fitur foto struk belum aktif (set GEMINI_API_KEY / OPENROUTER_API_KEY, atau bind Workers AI 'AI').");
   }
   await sendMessage(env, chatId, "📸 Membaca struk...");
 
@@ -513,7 +514,7 @@ async function handleReceiptPhoto(env, chatId, msg, mode) {
   const bytes = await getTelegramFile(env, photo.file_id);
 
   const cfgAi = await getConfig(env, msg.from.id);
-  const result = await readReceipt(env, bytes, cfgAi.useGemini);
+  const result = await readReceipt(env, bytes, cfgAi);
   if (!result || !result.amount) {
     const why = result && result.debug ? `\n\n(debug: ${result.debug})` : "";
     return sendMessage(
@@ -697,19 +698,36 @@ async function setCatatDraft(env, uid, d) { await env.EXPENSES.put(catatDraftKey
 async function getCatatDraft(env, uid) { const r = await env.EXPENSES.get(catatDraftKey(uid)); return r ? JSON.parse(r) : null; }
 async function clearCatatDraft(env, uid) { await env.EXPENSES.delete(catatDraftKey(uid)); }
 
-// Pilih mesin OCR: Gemini (akurat) kalau key ada & diizinkan, jika tidak Workers AI.
-async function readReceipt(env, arrayBuffer, useGemini = true) {
-  if (env.GEMINI_API_KEY && useGemini) {
-    const g = await readReceiptGemini(env, arrayBuffer);
-    if (g && g.amount) return g;
-    // kalau Gemini gagal & Workers AI tersedia, coba cadangan
-    if (env.AI) {
-      const w = await readReceiptWorkersAI(env, arrayBuffer);
-      if (w && w.amount) return w;
-    }
-    return g; // bawa info debug dari Gemini
+// Urutan mesin OCR = preferensi user (cfg.ocr) lalu sisanya sbg cadangan,
+// hanya yang key/binding-nya tersedia.
+function ocrEngineOrder(env, cfg) {
+  const avail = {
+    gemini: !!env.GEMINI_API_KEY,
+    qwen: !!env.OPENROUTER_API_KEY,
+    workers: !!env.AI,
+  };
+  // Mesin utama: cfg.ocr kalau diset; kalau tidak, turunkan dari flag lama useGemini.
+  const pref = (cfg && cfg.ocr) || (cfg && cfg.useGemini === false ? "workers" : "gemini");
+  const order = [pref, "gemini", "qwen", "workers"].filter((e, i, a) => a.indexOf(e) === i);
+  return order.filter((e) => avail[e]);
+}
+
+// Baca struk: coba mesin utama, kalau gagal jatuh ke cadangan (Gemini/Qwen/Workers AI).
+async function readReceipt(env, arrayBuffer, cfg) {
+  const order = ocrEngineOrder(env, cfg);
+  if (!order.length) {
+    return { amount: 0, toko: "", debug: "Tak ada mesin OCR aktif (set GEMINI_API_KEY / OPENROUTER_API_KEY, atau bind Workers AI)." };
   }
-  return readReceiptWorkersAI(env, arrayBuffer);
+  let last = null;
+  for (const eng of order) {
+    let r = null;
+    if (eng === "gemini") r = await readReceiptGemini(env, arrayBuffer);
+    else if (eng === "qwen") r = await readReceiptOpenRouter(env, arrayBuffer);
+    else if (eng === "workers") r = await readReceiptWorkersAI(env, arrayBuffer);
+    if (r && r.amount) return r;
+    if (r) last = r; // simpan info debug terakhir yang informatif
+  }
+  return last || { amount: 0, toko: "", debug: "Semua mesin OCR gagal." };
 }
 
 async function readReceiptGemini(env, arrayBuffer) {
@@ -802,6 +820,69 @@ async function readReceiptWorkersAI(env, arrayBuffer) {
     return null;
   }
   return parseReceiptJson((out && (out.response || out.description || "")) + "");
+}
+
+// Qwen-VL (atau model vision lain) lewat OpenRouter — API OpenAI-compatible.
+// Model default bisa diganti lewat secret OPENROUTER_MODEL (harus model *vision*).
+async function readReceiptOpenRouter(env, arrayBuffer) {
+  const model = (env.OPENROUTER_MODEL || "qwen/qwen-2.5-vl-72b-instruct").trim();
+  const url = "https://openrouter.ai/api/v1/chat/completions";
+  const dataUrl = "data:image/jpeg;base64," + abToBase64(arrayBuffer);
+  const body = {
+    model,
+    temperature: 0,
+    max_tokens: 512,
+    response_format: { type: "json_object" },
+    messages: [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: RECEIPT_PROMPT + ' Balas HANYA JSON: {"total": <angka>, "toko": "<nama>"}.' },
+          { type: "image_url", image_url: { url: dataUrl } },
+        ],
+      },
+    ],
+  };
+  let status = 0, bodyText = "", lastErr = "";
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const r = await fetch(url, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${env.OPENROUTER_API_KEY}`,
+          "HTTP-Referer": "https://github.com/pamanloki/catatan-bot",
+          "X-Title": "catatan-bot",
+        },
+        body: JSON.stringify(body),
+      });
+      status = r.status;
+      bodyText = await r.text();
+    } catch (e) {
+      lastErr = `OpenRouter gagal konek: ${e && e.message ? e.message : e}`;
+      await sleep(1200 * attempt);
+      continue;
+    }
+    if ((status === 429 || status >= 500) && attempt < 3) {
+      lastErr = `OpenRouter sibuk (HTTP ${status})`;
+      await sleep(1200 * attempt);
+      continue;
+    }
+    break;
+  }
+
+  if (!bodyText) return { amount: 0, toko: "", debug: lastErr || "OpenRouter tidak merespons" };
+  let j;
+  try { j = JSON.parse(bodyText); } catch { return { amount: 0, toko: "", debug: `OpenRouter HTTP ${status}: ${bodyText.slice(0, 160)}` }; }
+  if (status !== 200 || j.error) {
+    const m = (j.error && (j.error.message || j.error)) || `HTTP ${status}`;
+    return { amount: 0, toko: "", debug: `OpenRouter: ${(typeof m === "string" ? m : JSON.stringify(m)).slice(0, 180)}` };
+  }
+  const c = j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content;
+  const text = typeof c === "string" ? c : (Array.isArray(c) ? c.map((p) => p && p.text || "").join("") : JSON.stringify(c || ""));
+  const parsed = parseReceiptJson(text);
+  if (parsed && parsed.amount) return parsed;
+  return { amount: 0, toko: "", debug: `OpenRouter balas tapi total tak terbaca: ${(text || "").slice(0, 120)}` };
 }
 
 // Ekstrak {total, toko} dari teks balasan AI.
@@ -1033,7 +1114,8 @@ async function getConfig(env, uid) {
     budget: c.budget || 0,
     wallets: Array.isArray(c.wallets) && c.wallets.length ? c.wallets : ["Cash", "Bank"],
     defaultWallet: c.defaultWallet || "Cash",
-    useGemini: c.useGemini !== false, // default true (pakai Gemini bila key ada)
+    useGemini: c.useGemini !== false, // default true (pakai Gemini bila key ada) — dipertahankan utk kompatibilitas
+    ocr: c.ocr || null, // mesin OCR utama: "gemini" | "qwen" | "workers" (null = turunkan dari useGemini)
     presets: Array.isArray(c.presets) ? c.presets : null, // pengeluaran; null = default
     incomePresets: Array.isArray(c.incomePresets) ? c.incomePresets : null, // pemasukan
   };
@@ -1605,37 +1687,48 @@ function parseAnyDate(s) {
 }
 
 // /ai            -> status mesin baca struk + tombol
-// /ai on | off   -> pakai Gemini (on) atau Workers AI (off)
+// /ai gemini | qwen | off  -> pilih mesin baca struk (Gemini / Qwen-VL OpenRouter / Workers AI)
 async function handleAi(env, chatId, uid, arg) {
   const cfg = await getConfig(env, uid);
   const a = arg.toLowerCase();
 
   if (a === "on" || a === "gemini") {
     if (!env.GEMINI_API_KEY) return sendMessage(env, chatId, "GEMINI_API_KEY belum diset di Worker.", BACK_MENU);
-    cfg.useGemini = true;
+    cfg.ocr = "gemini"; cfg.useGemini = true;
     await saveConfig(env, uid, cfg);
     return sendMessage(env, chatId, "🤖 Mesin baca struk: Gemini (akurat).", BACK_MENU);
   }
+  if (a === "qwen" || a === "openrouter" || a === "or") {
+    if (!env.OPENROUTER_API_KEY) return sendMessage(env, chatId, "OPENROUTER_API_KEY belum diset di Worker. Buat key gratis di openrouter.ai lalu simpan sbg Secret.", BACK_MENU);
+    cfg.ocr = "qwen"; cfg.useGemini = true;
+    await saveConfig(env, uid, cfg);
+    const m = (env.OPENROUTER_MODEL || "qwen/qwen-2.5-vl-72b-instruct").trim();
+    return sendMessage(env, chatId, `🐉 Mesin baca struk: Qwen-VL via OpenRouter\n<code>${m}</code>`, { ...BACK_MENU, parse_mode: "HTML" });
+  }
   if (a === "off" || a === "workers" || a === "cf") {
-    cfg.useGemini = false;
+    cfg.ocr = "workers"; cfg.useGemini = false;
     await saveConfig(env, uid, cfg);
     return sendMessage(env, chatId, "🤖 Mesin baca struk: Workers AI (data tetap di Cloudflare).", BACK_MENU);
   }
 
-  const aktif = cfg.useGemini && env.GEMINI_API_KEY ? "Gemini" : "Workers AI";
-  const punyaGemini = env.GEMINI_API_KEY ? "ada" : "belum diset";
+  const label = { gemini: "Gemini", qwen: "Qwen-VL (OpenRouter)", workers: "Workers AI" };
+  const order = ocrEngineOrder(env, cfg);
+  const aktif = order.length ? label[order[0]] : "(tidak ada mesin aktif)";
+  const cadangan = order.slice(1).map((e) => label[e]).join(" → ") || "-";
+  const st = `Gemini: ${env.GEMINI_API_KEY ? "✅" : "—"} · OpenRouter: ${env.OPENROUTER_API_KEY ? "✅" : "—"} · Workers AI: ${env.AI ? "✅" : "—"}`;
   const rows = [
     [
-      { text: "🤖 Gemini (akurat)", callback_data: "ai_on" },
-      { text: "☁️ Workers AI (privat)", callback_data: "ai_off" },
+      { text: "🤖 Gemini", callback_data: "ai_on" },
+      { text: "🐉 Qwen-VL", callback_data: "ai_qwen" },
     ],
+    [{ text: "☁️ Workers AI (privat)", callback_data: "ai_off" }],
     [BACK_BTN],
   ];
   return sendMessage(
     env,
     chatId,
-    `Mesin baca struk saat ini: ${aktif}.\nGEMINI_API_KEY: ${punyaGemini}.\n\n• Gemini: lebih akurat, tapi data struk bisa dipakai Google (free tier).\n• Workers AI: kurang akurat, tapi data tetap di Cloudflare.`,
-    { reply_markup: { inline_keyboard: rows } },
+    `Mesin baca struk utama: <b>${aktif}</b>\nCadangan otomatis: ${cadangan}\n${st}\n\n• Gemini: akurat, data via Google (free tier).\n• Qwen-VL (OpenRouter): akurat, model bisa diganti (secret <code>OPENROUTER_MODEL</code>).\n• Workers AI: paling privat (tetap di Cloudflare), kurang akurat.\n\nKalau mesin utama gagal, otomatis dicoba yang lain.`,
+    { reply_markup: { inline_keyboard: rows }, parse_mode: "HTML" },
   );
 }
 

@@ -34,13 +34,20 @@ Secrets (Settings → Variables and Secrets, tipe Secret):
 - `ALLOWED_IDS` — daftar id Telegram (koma) untuk mode privat; kosong = terbuka
 - `GEMINI_API_KEY` — opsional; kalau ada, foto struk dibaca Gemini (lebih akurat)
 - `GEMINI_MODEL` — opsional; default `gemini-3.6-flash`
+- `OPENROUTER_API_KEY` — opsional; aktifkan Qwen-VL (atau model vision lain) via OpenRouter
+- `OPENROUTER_MODEL` — opsional; default `qwen/qwen-2.5-vl-72b-instruct` (HARUS model *vision/VL*)
 
 Bindings (Settings → Bindings):
 - KV Namespace → variable **`EXPENSES`** (penyimpanan)
 - Workers AI → variable **`AI`** (cadangan pembaca struk bila tanpa Gemini)
 
-`GEMINI_API_KEY` (opsional) → foto struk dibaca Gemini (`GEMINI_MODEL`, default
-`gemini-3.6-flash`) dengan `responseSchema` JSON; Workers AI jadi cadangan.
+Mesin OCR struk dipilih di `readReceipt` → `ocrEngineOrder(env, cfg)`: mesin utama
+dari `cfg.ocr` (`gemini`/`qwen`/`workers`), sisanya jadi cadangan otomatis, cuma yang
+key/binding-nya ada. Ganti mesin lewat `/ai gemini|qwen|off` (atau tombol menu `/ai`).
+- Gemini → `readReceiptGemini` (`GEMINI_MODEL`, default `gemini-3.6-flash`, `responseSchema` JSON).
+- Qwen-VL via OpenRouter → `readReceiptOpenRouter` (API OpenAI-compatible, `OPENROUTER_MODEL`).
+- Workers AI → `readReceiptWorkersAI` (cadangan lokal, tetap di Cloudflare).
+Semua mengembalikan `{ amount, toko, debug? }` lewat `parseReceiptJson`.
 
 Cron Trigger `0 0 1 * *` → memicu `scheduled` untuk rekap bulanan.
 
