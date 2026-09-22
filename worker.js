@@ -840,17 +840,19 @@ async function readReceiptWorkersAI(env, arrayBuffer) {
 
 // Daftar model VISION di OpenRouter untuk menu pilih model. Slug bisa berubah
 // sewaktu-waktu; kalau tak ada yang cocok, user pakai opsi "ketik model sendiri".
+// Semua GRATIS (slug :free). Ketersediaan model :free bisa berubah sewaktu-waktu;
+// kalau satu nonaktif, pilih yang lain (bot otomatis fallback juga).
 const OR_MODELS = [
-  { id: "qwen/qwen-2.5-vl-72b-instruct", label: "Qwen2.5-VL 72B (paling akurat)" },
-  { id: "qwen/qwen-2.5-vl-7b-instruct", label: "Qwen2.5-VL 7B (murah/cepat)" },
-  { id: "meta-llama/llama-3.2-11b-vision-instruct", label: "Llama 3.2 11B Vision" },
-  { id: "mistralai/pixtral-12b", label: "Pixtral 12B" },
-  { id: "google/gemini-2.0-flash-001", label: "Gemini 2.0 Flash (vision)" },
+  { id: "qwen/qwen-2.5-vl-72b-instruct:free", label: "🆓 Qwen2.5-VL 72B (paling akurat)" },
+  { id: "qwen/qwen2.5-vl-32b-instruct:free", label: "🆓 Qwen2.5-VL 32B" },
+  { id: "meta-llama/llama-3.2-11b-vision-instruct:free", label: "🆓 Llama 3.2 11B Vision" },
+  { id: "mistralai/mistral-small-3.2-24b-instruct:free", label: "🆓 Mistral Small 3.2 (vision)" },
+  { id: "google/gemini-2.0-flash-exp:free", label: "🆓 Gemini 2.0 Flash exp" },
 ];
 
 // Model OpenRouter efektif: pilihan user > secret OPENROUTER_MODEL > default.
 function orModel(env, cfg) {
-  return ((cfg && cfg.orModel) || env.OPENROUTER_MODEL || "qwen/qwen-2.5-vl-72b-instruct").trim();
+  return ((cfg && cfg.orModel) || env.OPENROUTER_MODEL || "qwen/qwen-2.5-vl-72b-instruct:free").trim();
 }
 
 // Qwen-VL (atau model vision lain) lewat OpenRouter — API OpenAI-compatible.
@@ -1734,7 +1736,7 @@ async function handleAi(env, chatId, uid, arg) {
     if (!env.OPENROUTER_API_KEY) return sendMessage(env, chatId, "OPENROUTER_API_KEY belum diset di Worker. Buat key gratis di openrouter.ai lalu simpan sbg Secret.", BACK_MENU);
     cfg.ocr = "qwen"; cfg.useGemini = true;
     await saveConfig(env, uid, cfg);
-    const m = (env.OPENROUTER_MODEL || "qwen/qwen-2.5-vl-72b-instruct").trim();
+    const m = orModel(env, cfg);
     return sendMessage(env, chatId, `🐉 Mesin baca struk: Qwen-VL via OpenRouter\n<code>${m}</code>`, { ...BACK_MENU, parse_mode: "HTML" });
   }
   if (a === "off" || a === "workers" || a === "cf") {

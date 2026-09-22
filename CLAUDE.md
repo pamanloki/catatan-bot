@@ -35,7 +35,7 @@ Secrets (Settings → Variables and Secrets, tipe Secret):
 - `GEMINI_API_KEY` — opsional; kalau ada, foto struk dibaca Gemini (lebih akurat)
 - `GEMINI_MODEL` — opsional; default `gemini-3.6-flash`
 - `OPENROUTER_API_KEY` — opsional; aktifkan Qwen-VL (atau model vision lain) via OpenRouter
-- `OPENROUTER_MODEL` — opsional; default `qwen/qwen-2.5-vl-72b-instruct` (HARUS model *vision/VL*)
+- `OPENROUTER_MODEL` — opsional; default `qwen/qwen-2.5-vl-72b-instruct:free` (gratis) (HARUS model *vision/VL*)
 
 Bindings (Settings → Bindings):
 - KV Namespace → variable **`EXPENSES`** (penyimpanan)

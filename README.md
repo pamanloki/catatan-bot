@@ -49,7 +49,7 @@ Seluruh logika ada di satu file: `worker.js` (tanpa framework/dependency).
    | `GEMINI_API_KEY` | opsional — baca struk **jauh lebih akurat** (lihat bawah) |
    | `GEMINI_MODEL` | opsional — default `gemini-3.6-flash` |
    | `OPENROUTER_API_KEY` | opsional — pakai **Qwen-VL** (dsb) via OpenRouter (lihat bawah) |
-   | `OPENROUTER_MODEL` | opsional — default `qwen/qwen-2.5-vl-72b-instruct` (**harus model vision/VL**) |
+   | `OPENROUTER_MODEL` | opsional — default `qwen/qwen-2.5-vl-72b-instruct:free` (gratis) (**harus model vision/VL**) |
 
 3. **Bindings** (Settings → Bindings):
    - **KV Namespace** → buat namespace → bind ke variable **`EXPENSES`**
@@ -76,7 +76,7 @@ Model vision gratis Cloudflare kurang jago baca angka struk. Untuk hasil jauh le
 Mau coba model lain (Qwen-VL, dll) tanpa ganti kode:
 1. Buat API key di **OpenRouter** — https://openrouter.ai/keys
 2. Tambahkan Secret `OPENROUTER_API_KEY` (dan opsional `OPENROUTER_MODEL`, **harus model vision/VL**
-   mis. `qwen/qwen-2.5-vl-72b-instruct`), lalu Deploy.
+   mis. `qwen/qwen-2.5-vl-72b-instruct:free`), lalu Deploy.
 3. Di bot ketik `/ai qwen` (atau tombol **🐉 Qwen-VL** di menu `/ai`) untuk menjadikannya mesin utama.
    Kalau mesin utama gagal, bot otomatis coba mesin lain yang tersedia.
 4. **Pilih model** lewat `/model` (atau tombol **🎛️ Pilih model** di menu `/ai`): ada daftar model
