@@ -552,13 +552,13 @@ async function handleReceiptPhoto(env, chatId, msg, mode) {
     const note = cls.note || result.toko || "struk";
     await addEntry(env, uid, { kind: cls.kind, amount: result.amount, note, party, status: "belum", src: "foto" });
     const label = cls.kind === "hutang" ? "📕 Hutang (struk)" : "📗 Piutang (struk)";
-    return sendMessage(env, chatId, `${label}: ${fmtRp(result.amount)} — ${party} (${note})`, BACK_MENU);
+    return sendMessage(env, chatId, `${label}: ${fmtRp(result.amount)} — ${party} (${note})${viaLine(result)}`, BACK_MENU);
   }
 
   if (cls.kind === "masuk") {
     const note = cls.note || result.toko || "pemasukan";
     await addEntry(env, uid, { kind: "masuk", amount: result.amount, note, src: "foto" });
-    return sendMessage(env, chatId, `🟢 Pemasukan (struk): ${fmtRp(result.amount)} — ${note}`, BACK_MENU);
+    return sendMessage(env, chatId, `🟢 Pemasukan (struk): ${fmtRp(result.amount)} — ${note}${viaLine(result)}`, BACK_MENU);
   }
 
   if (cls.kind === "mutasi") {
@@ -570,7 +570,7 @@ async function handleReceiptPhoto(env, chatId, msg, mode) {
     return sendMessage(
       env,
       chatId,
-      `💵 Tarik tunai (struk): ${fmtRp(result.amount)} — ${from} → ${to}\n(pindah dompet, bukan pengeluaran)`,
+      `💵 Tarik tunai (struk): ${fmtRp(result.amount)} — ${from} → ${to}\n(pindah dompet, bukan pengeluaran)${viaLine(result)}`,
       BACK_MENU,
     );
   }
@@ -584,7 +584,7 @@ async function handleReceiptPhoto(env, chatId, msg, mode) {
     env,
     chatId,
     [
-      `🔴 Pengeluaran (struk): ${fmtRp(result.amount)} — ${note} [${category}]`,
+      `🔴 Pengeluaran (struk): ${fmtRp(result.amount)} — ${note} [${category}]${viaLine(result)}`,
       ...extra,
       "",
       "ℹ️ Kalau ini hutang/piutang: kirim ulang foto dgn caption 'piutang <nama>' atau 'hutang <nama>'.",
@@ -630,7 +630,7 @@ async function sendReceiptVerify(env, chatId, uid, result, note) {
     [{ text: "✏️ Ubah nominal", callback_data: "rv_amt" }, { text: "❌ Batal", callback_data: "menu" }],
   ];
   const toko = result.toko ? ` — ${result.toko}` : "";
-  return sendMessage(env, chatId, `🧾 Terbaca: ${fmtRp(result.amount)}${toko}\nMau dicatat sebagai apa?`, kb(rows));
+  return sendMessage(env, chatId, `🧾 Terbaca: ${fmtRp(result.amount)}${toko}${viaLine(result)}\nMau dicatat sebagai apa?`, kb(rows));
 }
 
 // Jenis dipilih di menu verifikasi.
@@ -740,11 +740,21 @@ async function readReceipt(env, arrayBuffer, cfg) {
     if (eng === "gemini") r = await readReceiptGemini(env, arrayBuffer);
     else if (eng === "qwen") r = await readReceiptOpenRouter(env, arrayBuffer, cfg);
     else if (eng === "workers") r = await readReceiptWorkersAI(env, arrayBuffer);
-    if (r && r.amount) return r;
+    if (r && r.amount) { r.via = engineLabel(env, cfg, eng); return r; }
     if (r) last = r; // simpan info debug terakhir yang informatif
   }
   return last || { amount: 0, toko: "", debug: "Semua mesin OCR gagal." };
 }
+
+// Label mesin/model yang dipakai (untuk ditampilkan di hasil scan).
+function engineLabel(env, cfg, eng) {
+  if (eng === "gemini") return `Gemini (${(env.GEMINI_MODEL || "gemini-3.6-flash").trim()})`;
+  if (eng === "qwen") return `${orModel(env, cfg)} · OpenRouter`;
+  if (eng === "workers") return "Workers AI (Cloudflare)";
+  return eng;
+}
+// Baris kecil "dibaca oleh model apa" untuk pesan hasil struk.
+function viaLine(result) { return result && result.via ? `\n🧠 dibaca: ${result.via}` : ""; }
 
 async function readReceiptGemini(env, arrayBuffer) {
   const model = (env.GEMINI_MODEL || "gemini-3.6-flash").trim();
