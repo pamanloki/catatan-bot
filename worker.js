@@ -1865,12 +1865,19 @@ async function handleAiModelsLive(env, chatId, uid) {
     });
     const j = await r.json();
     const arr = (j && j.data) || [];
-    list = arr.filter((m) => {
+    // Buang model yg jelas bukan buat baca teks/OCR (moderasi, embedding, audio, dll).
+    const junk = /safety|guard|moderat|embed|rerank|tts|stt|whisper|audio|speech|video|image-gen|diffusion/i;
+    // Utamakan keluarga model yg memang jago OCR/vision.
+    const good = /vl|vision|pixtral|internvl|minicpm|molmo|gemma|llama|mistral|gemini|qwen|phi/i;
+    const cand = arr.filter((m) => {
       const img = ((m.architecture && m.architecture.input_modalities) || []).includes("image");
       const p = m.pricing || {};
       const free = Number(p.prompt || 0) === 0 && Number(p.completion || 0) === 0 && Number(p.image || 0) === 0;
-      return img && free && /:free$/.test(m.id || "");
-    }).map((m) => m.id).slice(0, 24);
+      return img && free && /:free$/.test(m.id || "") && !junk.test(m.id || "");
+    }).map((m) => m.id);
+    // Model "good" di atas, sisanya di bawah.
+    cand.sort((a, b) => (good.test(b) ? 1 : 0) - (good.test(a) ? 1 : 0));
+    list = cand.slice(0, 24);
   } catch (e) {
     return sendMessage(env, chatId, `❌ Gagal ambil daftar: ${e && e.message ? e.message : e}`, BACK_MENU);
   }
@@ -1885,13 +1892,18 @@ async function handleAiModelsLive(env, chatId, uid) {
 
 function ormListKey(uid) { return `ormlist:${uid}`; }
 
-// Pilih model dari daftar live (/aimodels).
+// Pilih model dari daftar live (/aimodels) -> set + langsung tes otomatis.
 async function pickOrModelLive(env, chatId, uid, idx) {
   const raw = await env.EXPENSES.get(ormListKey(uid));
   const list = raw ? JSON.parse(raw) : [];
   const id = list[idx];
   if (!id) return sendMessage(env, chatId, "Daftar kadaluarsa. Ketik /aimodels lagi.", BACK_MENU);
-  return setOrModel(env, chatId, uid, id);
+  const cfg = await getConfig(env, uid);
+  cfg.orModel = id.trim();
+  cfg.ocr = "qwen"; cfg.useGemini = true;
+  await saveConfig(env, uid, cfg);
+  await sendMessage(env, chatId, `✅ Model diset: <code>${htmlEsc(id)}</code>\nSekarang kutes dulu...`, { parse_mode: "HTML" });
+  return handleAiTest(env, chatId, uid);
 }
 
 // Terima file .json -> validasi -> minta konfirmasi sebelum menimpa.
