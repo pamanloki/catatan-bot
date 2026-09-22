@@ -1772,7 +1772,10 @@ async function handleAi(env, chatId, uid, arg) {
     ],
     [{ text: "☁️ Workers AI (privat)", callback_data: "ai_off" }],
   ];
-  if (env.OPENROUTER_API_KEY) rows.push([{ text: "🎛️ Pilih model (OpenRouter)", callback_data: "ai_model" }]);
+  if (env.OPENROUTER_API_KEY) {
+    rows.push([{ text: "🎛️ Pilih model (OpenRouter)", callback_data: "ai_model" }]);
+    rows.push([{ text: "🔎 Model gratis (live)", callback_data: "ai_models_live" }, { text: "🔬 Tes model", callback_data: "ai_test" }]);
+  }
   rows.push([BACK_BTN]);
   const modelNow = env.OPENROUTER_API_KEY ? `\nModel OpenRouter: <code>${orModel(env, cfg)}</code>` : "";
   return sendMessage(
