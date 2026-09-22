@@ -151,6 +151,9 @@ async function handleCallback(env, cq) {
       await setMode(env, uid, "or_model");
       return sendMessage(env, chatId, "Ketik slug model OpenRouter (mis. qwen/qwen-2.5-vl-7b-instruct). Harus model vision/VL.");
     }
+    if (data.startsWith("orm2:")) return pickOrModelLive(env, chatId, uid, Number(data.slice(5)));
+    if (data === "ai_models_live") return handleAiModelsLive(env, chatId, uid);
+    if (data === "ai_test") return handleAiTest(env, chatId, uid);
     if (data === "del_last") return deleteLast(env, chatId, uid, BACK_MENU);
     if (data === "del_all") {
       return sendMessage(env, chatId, "⚠️ Hapus SEMUA catatan? Tidak bisa dibatalkan.\nSaran: /backup dulu.", {
@@ -346,6 +349,8 @@ async function routeMessage(env, chatId, msg) {
   if (lower.startsWith("/total")) return sendTotal(env, chatId, uid);
   if (lower.startsWith("/excel")) return exportExcel(env, chatId, uid);
   if (lower.startsWith("/export")) return exportCsv(env, chatId, uid);
+  if (lower.startsWith("/aimodels")) return handleAiModelsLive(env, chatId, uid);
+  if (lower.startsWith("/aitest")) return handleAiTest(env, chatId, uid);
   if (lower.startsWith("/model")) return handleModelMenu(env, chatId, uid);
   if (lower.startsWith("/ai")) return handleAi(env, chatId, uid, text.slice(3).trim());
   if (lower.startsWith("/impor") || lower.startsWith("/import")) return handleImportStart(env, chatId, uid);
@@ -1788,6 +1793,7 @@ async function handleModelMenu(env, chatId, uid) {
   const rows = OR_MODELS.map((m, i) => [
     { text: `${m.id === now ? "✅ " : ""}${m.label}`, callback_data: `orm:${i}` },
   ]);
+  rows.push([{ text: "🔎 Model gratis (live)", callback_data: "ai_models_live" }, { text: "🔬 Tes model", callback_data: "ai_test" }]);
   rows.push([{ text: "✏️ Ketik model sendiri", callback_data: "orm_custom" }]);
   rows.push([BACK_BTN]);
   return sendMessage(
@@ -1805,6 +1811,84 @@ async function setOrModel(env, chatId, uid, model) {
   cfg.ocr = "qwen"; cfg.useGemini = true;
   await saveConfig(env, uid, cfg);
   return sendMessage(env, chatId, `✅ Model OpenRouter diset: <code>${cfg.orModel}</code>\nMesin baca struk sekarang: Qwen-VL/OpenRouter.`, { ...BACK_MENU, parse_mode: "HTML" });
+}
+
+// /aitest -> panggil model OpenRouter yang aktif dgn 1 request kecil, tampilkan
+// status/error asli. Berguna buat tau kenapa Qwen gagal (model hilang / limit / no credit).
+async function handleAiTest(env, chatId, uid) {
+  if (!env.OPENROUTER_API_KEY) return sendMessage(env, chatId, "OPENROUTER_API_KEY belum diset di Worker.", BACK_MENU);
+  const cfg = await getConfig(env, uid);
+  const model = orModel(env, cfg);
+  await sendMessage(env, chatId, `🔬 Tes OpenRouter: <code>${model}</code> ...`, { parse_mode: "HTML" });
+  let status = 0, bodyText = "";
+  try {
+    const r = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${env.OPENROUTER_API_KEY}`,
+        "HTTP-Referer": "https://github.com/pamanloki/catatan-bot",
+        "X-Title": "catatan-bot",
+      },
+      body: JSON.stringify({ model, max_tokens: 5, messages: [{ role: "user", content: "balas: ok" }] }),
+    });
+    status = r.status;
+    bodyText = await r.text();
+  } catch (e) {
+    return sendMessage(env, chatId, `❌ Gagal konek: ${e && e.message ? e.message : e}`, BACK_MENU);
+  }
+  let j = null;
+  try { j = JSON.parse(bodyText); } catch {}
+  if (status === 200 && j && j.choices) {
+    return sendMessage(env, chatId, `✅ Model AKTIF & bisa dipakai.\n<code>${htmlEsc(model)}</code>`, { ...BACK_MENU, parse_mode: "HTML" });
+  }
+  const errMsg = (j && j.error && (j.error.message || j.error)) || bodyText.slice(0, 200) || `HTTP ${status}`;
+  let hint = "";
+  if (status === 404 || /not a valid model|no endpoints|not found/i.test(String(errMsg))) hint = "\n\n➡️ Model ini tak ada/nonaktif. Ketik /aimodels untuk pilih model gratis yang live.";
+  else if (status === 429 || /rate limit|rate-limit/i.test(String(errMsg))) hint = "\n\n➡️ Kena limit harian model gratis. Coba lagi besok, atau pilih model lain di /aimodels.";
+  else if (status === 402 || /credit|insufficient|payment/i.test(String(errMsg))) hint = "\n\n➡️ Model ini berbayar & credit-mu 0. Pakai slug :free (lihat /aimodels).";
+  return sendMessage(env, chatId, `❌ Gagal (HTTP ${status}):\n<code>${htmlEsc(String(errMsg)).slice(0, 300)}</code>${hint}`, { ...BACK_MENU, parse_mode: "HTML" });
+}
+
+// /aimodels -> ambil daftar model VISION GRATIS yang live sekarang dari OpenRouter,
+// simpan sementara di KV, tampilkan sbg tombol pilih langsung.
+async function handleAiModelsLive(env, chatId, uid) {
+  if (!env.OPENROUTER_API_KEY) return sendMessage(env, chatId, "OPENROUTER_API_KEY belum diset di Worker.", BACK_MENU);
+  await sendMessage(env, chatId, "🔎 Ambil daftar model vision gratis dari OpenRouter ...");
+  let list = [];
+  try {
+    const r = await fetch("https://openrouter.ai/api/v1/models", {
+      headers: { authorization: `Bearer ${env.OPENROUTER_API_KEY}` },
+    });
+    const j = await r.json();
+    const arr = (j && j.data) || [];
+    list = arr.filter((m) => {
+      const img = ((m.architecture && m.architecture.input_modalities) || []).includes("image");
+      const p = m.pricing || {};
+      const free = Number(p.prompt || 0) === 0 && Number(p.completion || 0) === 0 && Number(p.image || 0) === 0;
+      return img && free && /:free$/.test(m.id || "");
+    }).map((m) => m.id).slice(0, 24);
+  } catch (e) {
+    return sendMessage(env, chatId, `❌ Gagal ambil daftar: ${e && e.message ? e.message : e}`, BACK_MENU);
+  }
+  if (!list.length) {
+    return sendMessage(env, chatId, "Tak ada model vision gratis (:free) yang aktif saat ini. Coba lagi nanti, atau top-up sedikit credit lalu pakai model murah non-free.", BACK_MENU);
+  }
+  await env.EXPENSES.put(ormListKey(uid), JSON.stringify(list), { expirationTtl: 900 });
+  const rows = list.map((id, i) => [{ text: `🆓 ${id.replace(/:free$/, "")}`, callback_data: `orm2:${i}` }]);
+  rows.push([BACK_BTN]);
+  return sendMessage(env, chatId, `🆓 <b>${list.length}</b> model vision gratis yang LIVE sekarang.\nTap salah satu buat dipakai:`, { reply_markup: { inline_keyboard: rows }, parse_mode: "HTML" });
+}
+
+function ormListKey(uid) { return `ormlist:${uid}`; }
+
+// Pilih model dari daftar live (/aimodels).
+async function pickOrModelLive(env, chatId, uid, idx) {
+  const raw = await env.EXPENSES.get(ormListKey(uid));
+  const list = raw ? JSON.parse(raw) : [];
+  const id = list[idx];
+  if (!id) return sendMessage(env, chatId, "Daftar kadaluarsa. Ketik /aimodels lagi.", BACK_MENU);
+  return setOrModel(env, chatId, uid, id);
 }
 
 // Terima file .json -> validasi -> minta konfirmasi sebelum menimpa.
@@ -2642,6 +2726,7 @@ const CASH_PRESET = [["10rb", 10000], ["20rb", 20000], ["50rb", 50000], ["100rb"
 const BIG_PRESET = [["500rb", 500000], ["1jt", 1000000], ["2jt", 2000000], ["3jt", 3000000], ["5jt", 5000000], ["10jt", 10000000]];
 
 function kb(rows) { return { reply_markup: { inline_keyboard: rows } }; }
+function htmlEsc(s) { return String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
 function chunk(arr, n) { const out = []; for (let i = 0; i < arr.length; i += n) out.push(arr.slice(i, i + n)); return out; }
 
 // --- Preset keterangan (generik: kind "keluar" / "masuk") ---
